@@ -1,3 +1,9 @@
+## [0.13.37](https://github.com/framerslab/agentos/compare/v0.13.36...v0.13.37) (2026-10-10)
+
+### fix
+
+* **images:** edit, upscale and variation calls use the provider's own default model, and OpenAI variations go through the edits endpoint (#261) ([08005cf](https://github.com/framerslab/agentos/commit/08005cf405caab44dec5713468dcab535ef7efaf))
+
 ## [0.13.36](https://github.com/framerslab/agentos/compare/v0.13.35...v0.13.36) (2026-10-10)
 
 ### fix
