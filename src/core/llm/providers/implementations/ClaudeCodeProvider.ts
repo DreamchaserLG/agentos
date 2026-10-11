@@ -316,13 +316,17 @@ export class ClaudeCodeProvider implements IProvider {
     const result = await this.bridge.execute(bridgeOpts);
 
     if (result.isError) {
-      throw this.errorResultError(result.result);
+      /* The bridge carries the failure's message in `error`. */
+      throw this.errorResultError(result.error ?? result.result);
     }
 
-    /* Parse tool call response if tools were requested */
+    /* Parse tool call response if tools were requested. With --json-schema,
+     * Claude Code returns the reply that matches it in structured_output,
+     * which the bridge passes on as structuredOutput; the result text is
+     * parsed when there is none. */
     if (hasTools) {
       try {
-        const parsed = JSON.parse(result.result);
+        const parsed = result.structuredOutput ?? JSON.parse(result.result);
         if (parsed.response_type === 'tool_calls' && Array.isArray(parsed.tool_calls)) {
           return this.buildToolCallResponse(parsed.tool_calls, result, undefined, undefined, modelId);
         }
@@ -423,13 +427,28 @@ export class ClaudeCodeProvider implements IProvider {
 
             const finalText = event.result || accumulatedText;
 
-            /* Try parsing as tool call response */
+            /* Try parsing as tool call response. With --json-schema, Claude
+             * Code returns the reply that matches it in structured_output,
+             * which the bridge passes on as structuredOutput; the final text
+             * is parsed when there is none. */
             if (hasTools) {
               try {
-                const parsed = JSON.parse(finalText);
+                const parsed = event.structuredOutput ?? JSON.parse(finalText);
                 if (parsed.response_type === 'tool_calls' && Array.isArray(parsed.tool_calls)) {
                   finalChunk = this.buildToolCallResponse(
                     parsed.tool_calls,
+                    { sessionId: event.sessionId, usage: event.usage },
+                    responseId,
+                    finalUsage,
+                    modelId,
+                  );
+                  break;
+                }
+                /* A text reply in structured output is its `text`: the turn
+                 * that returns it ends with no assistant message of its own. */
+                if (event.structuredOutput != null && typeof parsed.text === 'string') {
+                  finalChunk = this.buildTextResponse(
+                    parsed.text,
                     { sessionId: event.sessionId, usage: event.usage },
                     responseId,
                     finalUsage,
@@ -727,15 +746,11 @@ Each tool call must include "id" (unique string), "name" (tool name), and "argum
 
   /**
    * The error a result flagged `is_error` stands for: generateCompletion()
-   * throws it, and a stream ends with it.
+   * throws it, and a stream ends with it. The bridge's execute() throws the
+   * same error when the CLI exits non-zero after such a result.
    */
   private errorResultError(message: string): ClaudeCodeProviderError {
-    return new ClaudeCodeProviderError(
-      `Claude Code returned an error: ${message}`,
-      'CRASHED',
-      'Try running "claude --bare -p test" manually to diagnose.',
-      true,
-    );
+    return ClaudeCodeProviderError.fromErrorResult(message);
   }
 
   /** Build a terminal streaming error chunk instead of throwing mid-stream. */

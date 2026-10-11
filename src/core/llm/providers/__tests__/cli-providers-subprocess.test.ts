@@ -3,7 +3,7 @@
  * subprocess stubbed where the bridges spawn it (execa). A failed run is
  * stubbed with the fields execa 10 sets on its error (lib/return/result.js):
  * `failed`, `timedOut`, `isCanceled`, `isTerminated` (a signal ended the
- * process), `exitCode`, `signal` and `stderr`.
+ * process), `exitCode`, `signal`, `stdout` and `stderr`.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Readable } from 'node:stream';
@@ -24,18 +24,34 @@ import type { StreamEvent } from '../../../../safety/sandbox/subprocess/types';
 interface ExecaFailure {
   exitCode?: number;
   signal?: string;
+  stdout?: string;
   stderr?: string;
   timedOut?: boolean;
+  /** The run's `timeout` in milliseconds, which execa names in the message of a timed-out run. */
+  timeout?: number;
   isCanceled?: boolean;
 }
 
-/** An error shaped as execa 10 rejects with when a run fails. */
-function execaError({ exitCode, signal, stderr = '', timedOut = false, isCanceled = false }: ExecaFailure): Error {
-  const message = isCanceled
-    ? 'Command was canceled'
-    : signal !== undefined
-      ? `Command was killed with ${signal}`
-      : `Command failed with exit code ${exitCode}`;
+/**
+ * An error shaped as execa 10 rejects with when a run fails. Its message
+ * starts as execa's does (getErrorPrefix in lib/return/message.js).
+ */
+function execaError({
+  exitCode,
+  signal,
+  stdout = '',
+  stderr = '',
+  timedOut = false,
+  timeout,
+  isCanceled = false,
+}: ExecaFailure): Error {
+  const message = timedOut
+    ? `Command timed out after ${timeout} milliseconds`
+    : isCanceled
+      ? 'Command was canceled'
+      : signal !== undefined
+        ? `Command was killed with ${signal}`
+        : `Command failed with exit code ${exitCode}`;
   return Object.assign(new Error(message), {
     failed: true,
     timedOut,
@@ -43,6 +59,7 @@ function execaError({ exitCode, signal, stderr = '', timedOut = false, isCancele
     isTerminated: signal !== undefined,
     exitCode,
     signal,
+    stdout,
     stderr,
   });
 }
@@ -151,6 +168,8 @@ const WEATHER_TOOL = {
 interface StreamFixture {
   /** A reply of "Hello", ending with the CLI's success result. */
   hello: unknown[];
+  /** A reply of `text` in one piece, as the CLI writes it now, ending with the CLI's success result. */
+  reply: (text: string) => unknown[];
   /** A reply that calls get_weather for Paris, ending with the success result. */
   toolCall: unknown[];
   /** A result line the CLI flags as an error, and the message it carries. */
@@ -168,6 +187,18 @@ const STREAM_PROVIDERS: Array<(typeof PROVIDERS)[number] & { fixture: StreamFixt
       hello: [
         { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello' } },
         { type: 'result', subtype: 'success', is_error: false, result: 'Hello', session_id: 's1' },
+      ],
+      // With --include-partial-messages, which the bridge passes, each delta
+      // comes wrapped as a stream_event (SDKPartialAssistantMessage in
+      // @anthropic-ai/claude-agent-sdk 0.3.296, sdk.d.ts).
+      reply: (text) => [
+        {
+          type: 'stream_event',
+          event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+          parent_tool_use_id: null,
+          session_id: 's1',
+        },
+        { type: 'result', subtype: 'success', is_error: false, result: text, session_id: 's1' },
       ],
       toolCall: [
         {
@@ -199,6 +230,12 @@ const STREAM_PROVIDERS: Array<(typeof PROVIDERS)[number] & { fixture: StreamFixt
       hello: [
         { type: 'text', text: 'Hello' },
         { type: 'result', status: 'success' },
+      ],
+      // MessageEvent and ResultEvent in packages/core/src/output/types.ts
+      // (google-gemini/gemini-cli at 9b6e0265).
+      reply: (text) => [
+        { type: 'message', timestamp: '2026-10-10T12:00:00.000Z', role: 'assistant', content: text, delta: true },
+        { type: 'result', timestamp: '2026-10-10T12:00:00.000Z', status: 'success' },
       ],
       toolCall: [
         { type: 'text', text: '<tool_call id="call_1" name="get_weather">{"city":"Paris"}</tool_call>' },
@@ -684,5 +721,243 @@ describe('ClaudeCodeProvider: the stream-json Claude Code writes with partial me
     expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual(['Hi ', 'there']);
     expect(final.error).toBeUndefined();
     expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hi there' } }] });
+  });
+});
+
+/**
+ * A run that writes `lines` and exits 0, its stdout read in two pieces: the
+ * second starts two bytes into the first `character` the lines carry. A pipe
+ * hands over what the CLI has written so far, wherever a character's bytes
+ * end, and the child's stdout gives Buffers: execa 10 sets no encoding on it,
+ * and decodes its own copy of the output, `result.stdout`, through one
+ * StringDecoder for the whole stream (lib/transform/encoding-transform.js).
+ */
+function splitRun(lines: unknown[], character: string) {
+  const bytes = Buffer.from(lines.map((line) => `${JSON.stringify(line)}\n`).join(''));
+  const at = bytes.indexOf(Buffer.from(character)) + 2;
+  return Object.assign(Promise.resolve({ failed: false, exitCode: 0, stdout: '', stderr: '' }), {
+    stdout: (async function* () {
+      yield bytes.subarray(0, at);
+      yield bytes.subarray(at);
+    })(),
+    kill: vi.fn(),
+  });
+}
+
+describe.each(STREAM_PROVIDERS)('$name: a character whose bytes two reads of stdout split', ({ binary, model, create, fixture }) => {
+  it('passes the character on whole, in the text delta and in the reply', async () => {
+    // U+1F600 takes four bytes in UTF-8, and the first read ends after two of them.
+    const reply = 'Hi \u{1F600}';
+    stubCli(binary, () => splitRun(fixture.reply(reply), '\u{1F600}'));
+    const provider = create();
+    await provider.initialize({});
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream(model, HELLO, {})) chunks.push(chunk);
+    const final = chunks[chunks.length - 1];
+
+    expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual([reply]);
+    expect(final.error).toBeUndefined();
+    expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: reply } }] });
+  });
+});
+
+/**
+ * A run that writes `lines` and exits 0, settled as execa 10 settles a run
+ * that has a `timeout`. The timer starts at the spawn; when it fires before
+ * the run has settled, execa calls kill(), which does nothing to a process
+ * that has exited, and fails the run with `timedOut` (killAfterTimeout in
+ * lib/terminate/timeout.js). The run settles once the process has exited and
+ * its stdout has ended; a run the timer failed waits for that as well
+ * (waitForSubprocessResult in lib/resolve/wait-subprocess.js) and carries the
+ * exit code the process had (getAsyncResult in lib/methods/main-async.js).
+ * stdout hands over one line per read, as a pipe does while the CLI streams
+ * its reply, and ends after the last line: the CLI has exited by then.
+ */
+function timedRun(lines: unknown[], timeout: number) {
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+  }, timeout);
+  let settle!: () => void;
+  const outcome = new Promise<unknown>((resolve, reject) => {
+    settle = () => {
+      clearTimeout(timer);
+      if (timedOut) reject(execaError({ exitCode: 0, timedOut: true, timeout }));
+      else resolve({ failed: false, exitCode: 0, stdout: '', stderr: '' });
+    };
+  });
+  outcome.catch(() => undefined);
+  return Object.assign(outcome, {
+    stdout: (async function* () {
+      for (const line of lines) yield Buffer.from(`${JSON.stringify(line)}\n`);
+      settle();
+    })(),
+    kill: vi.fn(),
+  });
+}
+
+describe.each(STREAM_PROVIDERS)('$name: a consumer slower than the timeout', ({ binary, model, create, fixture }) => {
+  it('gets the whole reply and its final chunk from a CLI that wrote them and exited 0 in time', async () => {
+    const timeout = 200;
+    stubCli(binary, (_args, options) => timedRun(fixture.hello, options.timeout));
+    const provider = create();
+    await provider.initialize({ requestTimeout: timeout });
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream(model, HELLO, {})) {
+      chunks.push(chunk);
+      // A consumer that spends longer than the timeout on each chunk.
+      if (!chunk.isFinal) await new Promise((resolve) => setTimeout(resolve, 2 * timeout));
+    }
+    const final = chunks[chunks.length - 1];
+
+    // The consumer held a chunk of the reply past the timeout: the case under test was reached.
+    expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual(['Hello']);
+    expect(final.error).toBeUndefined();
+    expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hello' } }] });
+  });
+});
+
+/**
+ * The session id of a Gemini CLI stream, which a direct reader of the bridge
+ * gets on the result event. The current CLI writes the id on the init event
+ * that opens the stream (InitEvent in packages/core/src/output/types.ts at
+ * 9b6e0265, written by packages/cli/src/nonInteractiveCli.ts), and its
+ * result event has no such field (ResultEvent).
+ */
+describe('GeminiCLIBridge: the session id of a stream', () => {
+  const at = '2026-10-10T12:00:00.000Z';
+
+  it.each<{ name: string; lines: unknown[] }>([
+    {
+      name: 'written on the init event, when the result carries none',
+      lines: [
+        { type: 'init', timestamp: at, session_id: 'g1', model: 'gemini-3.5-flash' },
+        { type: 'message', timestamp: at, role: 'user', content: 'Hello' },
+        { type: 'message', timestamp: at, role: 'assistant', content: 'Hi there', delta: true },
+        { type: 'result', timestamp: at, status: 'success' },
+      ],
+    },
+    {
+      name: 'written on a result line that carries one',
+      lines: [
+        { type: 'message', timestamp: at, role: 'assistant', content: 'Hi there', delta: true },
+        { type: 'result', timestamp: at, status: 'success', session_id: 'g1' },
+      ],
+    },
+  ])('ends with a result that carries the id $name', async ({ lines }) => {
+    stubCli('gemini', () => cliRun(lines, 0));
+    const events: StreamEvent[] = [];
+    for await (const event of new GeminiCLIBridge().stream({ prompt: 'Hello' })) events.push(event);
+
+    expect(events.map((event) => event.type)).toEqual(['text_delta', 'result']);
+    expect(events[1]).toMatchObject({ type: 'result', sessionId: 'g1' });
+  });
+});
+
+/**
+ * Claude Code's JSON result for a turn stopped by an error subtype
+ * (SDKResultError in @anthropic-ai/claude-agent-sdk 0.3.296, sdk.d.ts): no
+ * result text, and its detail in `errors`, here none. The CLI can exit
+ * non-zero after it: the SDK's own reader of a run (Query.readMessages in
+ * sdk.mjs) replaces the process's exit error with the error result's text
+ * ("Replacing exit error with result text") unless the run was aborted.
+ */
+describe('ClaudeCodeProvider: a non-streaming call whose result Claude Code flags as an error', () => {
+  const line = { type: 'result', subtype: 'error_max_turns', is_error: true, num_turns: 2, errors: [], session_id: 's1' };
+
+  it.each([0, 1])('reports the error subtype and its errors (exit code %i)', async (exitCode) => {
+    // execa strips the final newline of stdout (stripFinalNewline).
+    const stdout = JSON.stringify(line);
+    stubCli('claude', () =>
+      exitCode === 0
+        ? Promise.resolve({ failed: false, exitCode: 0, stdout, stderr: '' })
+        : Promise.reject(execaError({ exitCode, stdout })),
+    );
+    const provider = new ClaudeCodeProvider();
+    await provider.initialize({});
+
+    await expect(provider.generateCompletion('claude-sonnet-4-6', HELLO, {})).rejects.toMatchObject({
+      code: 'CRASHED',
+      message: 'Claude Code returned an error: error_max_turns',
+    });
+  });
+});
+
+/**
+ * With --json-schema, which ClaudeCodeProvider passes when tools are present,
+ * Claude Code returns the reply that matches the schema in the result's
+ * structured_output (SDKResultSuccess in @anthropic-ai/claude-agent-sdk
+ * 0.3.296, sdk.d.ts; the SDK hands its own json_schema output format to the
+ * CLI as --json-schema, sdk.mjs). Such a turn ends with no trailing assistant
+ * message (the note on end-turn tool sessions in sdk.d.ts), and the SDK does
+ * not say what the CLI writes in `result` then; here it is empty.
+ */
+describe('ClaudeCodeProvider: a reply Claude Code returns as structured output', () => {
+  const cases = [
+    {
+      name: 'a tool call',
+      structured: {
+        response_type: 'tool_calls',
+        tool_calls: [{ id: 'call_1', name: 'get_weather', arguments: { city: 'Paris' } }],
+      },
+      expected: {
+        finishReason: 'tool_calls',
+        message: {
+          tool_calls: [
+            { id: 'call_1', type: 'function', function: { name: 'get_weather', arguments: JSON.stringify({ city: 'Paris' }) } },
+          ],
+        },
+      },
+    },
+    {
+      name: 'a text reply',
+      structured: { response_type: 'text', text: 'It is sunny in Paris.' },
+      expected: { finishReason: 'stop', message: { content: 'It is sunny in Paris.' } },
+    },
+  ];
+  const resultLine = (structured: object) => ({
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    result: '',
+    structured_output: structured,
+    session_id: 's1',
+    usage: { input_tokens: 12, output_tokens: 3 },
+  });
+
+  it.each(cases)('generateCompletion() returns $name from one run with the schema', async ({ structured, expected }) => {
+    const runs: string[][] = [];
+    stubCli('claude', (args) => {
+      runs.push(args);
+      return Promise.resolve({ failed: false, exitCode: 0, stdout: JSON.stringify(resultLine(structured)), stderr: '' });
+    });
+    const provider = new ClaudeCodeProvider();
+    await provider.initialize({});
+
+    const response = await provider.generateCompletion('claude-sonnet-4-6', HELLO, { tools: [WEATHER_TOOL] });
+
+    expect(response.choices[0]).toMatchObject(expected);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toContain('--json-schema');
+  });
+
+  it.each(cases)('generateCompletionStream() ends with $name', async ({ structured, expected }) => {
+    const runs: string[][] = [];
+    stubCli('claude', (args) => {
+      runs.push(args);
+      return cliRun([resultLine(structured)], 0);
+    });
+    const provider = new ClaudeCodeProvider();
+    await provider.initialize({});
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream('claude-sonnet-4-6', HELLO, { tools: [WEATHER_TOOL] })) {
+      chunks.push(chunk);
+    }
+    const final = chunks[chunks.length - 1];
+
+    expect(final.error).toBeUndefined();
+    expect(final.choices[0]).toMatchObject(expected);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toContain('--json-schema');
   });
 });

@@ -45,6 +45,17 @@ export interface BridgeResult {
   usage?: { input_tokens: number; output_tokens: number };
   /** Whether the CLI reported an error. */
   isError: boolean;
+  /**
+   * The failure's message, set beside `isError` by a bridge that reads one
+   * from its CLI's result (ClaudeCodeCLIBridge). `result` keeps the CLI's own
+   * result text.
+   */
+  error?: string;
+  /**
+   * The reply that matches the call's `jsonSchema`, when the CLI returns it
+   * apart from its result text (Claude Code's `structured_output`).
+   */
+  structuredOutput?: unknown;
   /** Wall-clock duration of the subprocess in ms. */
   durationMs: number;
 }
@@ -62,9 +73,26 @@ export type StreamEvent =
       isError?: boolean;
       /** The failure's message, set beside `isError`. */
       error?: string;
+      /**
+       * The reply that matches the call's `jsonSchema`, when the CLI returns
+       * it apart from its result text (Claude Code's `structured_output`).
+       */
+      structuredOutput?: unknown;
     }
   | { type: 'error'; error: string }
   | { type: 'system'; message: string };
+
+/**
+ * What a bridge keeps across the lines of one {@link CLISubprocessBridge.stream}
+ * call, for a CLI that writes on one line a value a later event needs. Each
+ * stream starts with an empty object and hands the same one to every
+ * `parseStreamEvent()` call of that stream; a bridge serves concurrent
+ * streams, so state kept on the bridge itself would mix them.
+ */
+export interface StreamParseContext {
+  /** The session id the CLI wrote on an earlier line, for an event whose own line carries none. */
+  sessionId?: string;
+}
 
 /** Result from {@link CLISubprocessBridge.checkBinaryInstalled}. */
 export type InstallCheckResult =

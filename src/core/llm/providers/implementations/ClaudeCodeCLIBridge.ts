@@ -14,7 +14,7 @@
 
 import { CLISubprocessBridge } from '../../../../safety/sandbox/subprocess/CLISubprocessBridge';
 import { ClaudeCodeProviderError } from '../errors/ClaudeCodeProviderError';
-import type { BridgeOptions, StreamEvent, OutputFormat } from '../../../../safety/sandbox/subprocess/types';
+import type { BridgeOptions, BridgeResult, StreamEvent, OutputFormat } from '../../../../safety/sandbox/subprocess/types';
 
 /* Re-export shared types for backwards compatibility with ClaudeCodeProvider imports */
 export type { BridgeOptions as CLIBridgeOptions, BridgeResult as CLIBridgeResult, StreamEvent } from '../../../../safety/sandbox/subprocess/types';
@@ -27,6 +27,7 @@ export type { InstallCheckResult } from '../../../../safety/sandbox/subprocess/t
  * - Flag assembly: `--bare`, `-p`, `--system-prompt`, `--json-schema`, `--max-turns`
  * - Error classification: caller abort, timeout, auth, rate-limit, context length, ENOENT, EACCES
  * - Stream event parsing: `content_block_delta` (nested under `stream_event` or at the top level), `result`, `error`, `system` events
+ * - JSON result: an error result's message in `error`, `structured_output` in `structuredOutput`, and a run that exits non-zero after an error result reported as that result
  * - Auth check: uses `--bare --max-turns 1` for lightweight health ping
  */
 export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
@@ -65,6 +66,48 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
     return args;
   }
 
+  /* ---- JSON result ---------------------------------------------- */
+
+  /**
+   * Claude Code's JSON result, read as the base class reads it, with two
+   * fields of Claude Code's own: the failure's message
+   * ({@link errorResultMessage}) in `error` when the CLI flags the result as
+   * an error, and in `structuredOutput` the reply that matches --json-schema
+   * when the CLI returns one (`structured_output`, SDKResultSuccess in
+   * @anthropic-ai/claude-agent-sdk 0.3.296). `result` keeps what the base
+   * reading gives.
+   */
+  protected parseJsonResult(stdout: string, durationMs: number): BridgeResult {
+    const result = super.parseJsonResult(stdout, durationMs);
+    let raw: any;
+    try {
+      raw = JSON.parse(stdout.trim());
+    } catch {
+      return result;
+    }
+    if (!raw || typeof raw !== 'object') return result;
+    return {
+      ...result,
+      ...(result.isError ? { error: this.errorResultMessage(raw) } : {}),
+      ...(raw.structured_output !== undefined ? { structuredOutput: raw.structured_output } : {}),
+    };
+  }
+
+  /**
+   * A run that exits non-zero after a result Claude Code flags as an error
+   * ends with the error that result stands for, as a result flagged at exit
+   * 0 does in the provider: `CRASHED` with the failure's message, and the
+   * exit code and stderr in `details`. The SDK reads a run the same way: its
+   * Query.readMessages replaces the process's exit error with the error
+   * result's text (@anthropic-ai/claude-agent-sdk 0.3.296, sdk.mjs).
+   */
+  protected classifyErrorResult(result: BridgeResult, error: any): ClaudeCodeProviderError {
+    return ClaudeCodeProviderError.fromErrorResult(result.error ?? result.result, {
+      exitCode: error.exitCode,
+      stderr: error.stderr ?? '',
+    });
+  }
+
   /* ---- Auth check override -------------------------------------- */
 
   protected buildAuthCheckArgs(): { args: string[]; stdin: string } {
@@ -96,7 +139,10 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
     /* Final result. Claude Code flags a failed turn (an API error, the turn
      * limit) with is_error. `result` is the CLI's own result text, '' when it
      * wrote none, as the bridge read it before 0.13.41; the failure's message
-     * ({@link errorResultMessage}) goes in `error`. */
+     * ({@link errorResultMessage}) goes in `error`. With --json-schema, the
+     * reply that matches the schema comes in structured_output
+     * (SDKResultSuccess in @anthropic-ai/claude-agent-sdk 0.3.296), which goes
+     * in `structuredOutput`. */
     if (raw.type === 'result') {
       const isError = raw.is_error === true;
       return {
@@ -107,6 +153,7 @@ export class ClaudeCodeCLIBridge extends CLISubprocessBridge {
           ? { input_tokens: raw.usage.input_tokens ?? 0, output_tokens: raw.usage.output_tokens ?? 0 }
           : undefined,
         ...(isError ? { isError: true, error: this.errorResultMessage(raw) } : {}),
+        ...(raw.structured_output !== undefined ? { structuredOutput: raw.structured_output } : {}),
       };
     }
 
