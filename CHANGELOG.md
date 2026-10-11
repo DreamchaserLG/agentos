@@ -1,3 +1,9 @@
+## [0.13.52](https://github.com/framerslab/agentos/compare/v0.13.51...v0.13.52) (2026-10-11)
+
+### fix
+
+* **providers:** CLI bridges decode split UTF-8, keep the timeout on the child, and read the Gemini session id (#304) ([fe4dcee](https://github.com/framerslab/agentos/commit/fe4dcee8c50b41d28afe9c627ae87b8c8437f4bc))
+
 ## [0.13.51](https://github.com/framerslab/agentos/compare/v0.13.50...v0.13.51) (2026-10-11)
 
 ### fix
