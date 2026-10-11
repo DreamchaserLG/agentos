@@ -1,3 +1,9 @@
+## [0.13.54](https://github.com/framerslab/agentos/compare/v0.13.53...v0.13.54) (2026-10-11)
+
+### fix
+
+* **providers:** structured-output text replies reach stream consumers, and execute() guards its error-result parse (#310) ([e88581f](https://github.com/framerslab/agentos/commit/e88581fe69aae63e335ab1a807033e5a0cf1f95c))
+
 ## [0.13.53](https://github.com/framerslab/agentos/compare/v0.13.52...v0.13.53) (2026-10-11)
 
 ### fix
