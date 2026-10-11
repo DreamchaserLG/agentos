@@ -1,3 +1,10 @@
+## [0.13.42](https://github.com/framerslab/agentos/compare/v0.13.41...v0.13.42) (2026-10-11)
+
+### feat
+
+* **hearing:** a batch transcription job: pieces in order, retries, merged seams (#262) ([9d6eb3c](https://github.com/framerslab/agentos/commit/9d6eb3c689faffec423a057391051fc860019429))
+* **storage:** add a browser key-value store, an outbox and list reconciliation (#275) ([91377cf](https://github.com/framerslab/agentos/commit/91377cf2b4ba03f81fdac34283cb2e44d2d01d76))
+
 ## [0.13.41](https://github.com/framerslab/agentos/compare/v0.13.40...v0.13.41) (2026-10-11)
 
 ### fix
