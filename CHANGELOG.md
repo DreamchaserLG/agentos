@@ -1,3 +1,13 @@
+## [0.13.39](https://github.com/framerslab/agentos/compare/v0.13.38...v0.13.39) (2026-10-11)
+
+### feat
+
+* **voice:** phraseHeard, a given sentence found in a transcript's first lines (#244) ([973f118](https://github.com/framerslab/agentos/commit/973f118e8000210b149185579c1c83c68593ea7d))
+
+### fix
+
+* **images:** OpenAI image calls default to GPT Image 2.5, off the models OpenAI retires on 23 October and 1 December (#273) ([971161d](https://github.com/framerslab/agentos/commit/971161da8cd07d825af9fe3a639b39ba3cb0f832))
+
 ## [0.13.38](https://github.com/framerslab/agentos/compare/v0.13.37...v0.13.38) (2026-10-11)
 
 ### feat
