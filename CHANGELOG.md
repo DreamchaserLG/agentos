@@ -1,3 +1,17 @@
+## [0.13.50](https://github.com/framerslab/agentos/compare/v0.13.49...v0.13.50) (2026-10-11)
+
+### feat
+
+* **vision:** a cloudTask option asks the cloud tier for the text alone (#301) ([2552104](https://github.com/framerslab/agentos/commit/2552104738601b93e133be6e919753fcbb07d1cc))
+
+### fix
+
+* **deps:** bump @framers/* deps to latest published versions (#303) ([6278c44](https://github.com/framerslab/agentos/commit/6278c445d85fcd84b63af08987de2ddc36d477a1))
+
+### ci
+
+* weekly pull request that bumps the @framers/* dependencies (#266) ([a9cad59](https://github.com/framerslab/agentos/commit/a9cad59769d6f1c4f0ff39518d23b84b1487c3b0))
+
 ## [0.13.49](https://github.com/framerslab/agentos/compare/v0.13.48...v0.13.49) (2026-10-11)
 
 ### fix
