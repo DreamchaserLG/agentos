@@ -1,3 +1,9 @@
+## [0.13.41](https://github.com/framerslab/agentos/compare/v0.13.40...v0.13.41) (2026-10-11)
+
+### fix
+
+* **providers:** health checks draw one key, CLI bridges classify errors by case and abort, stream results carry is_error (#277) ([e888fa8](https://github.com/framerslab/agentos/commit/e888fa8e74c0ebcd6b317415fcde61ad616ed3e6))
+
 ## [0.13.40](https://github.com/framerslab/agentos/compare/v0.13.39...v0.13.40) (2026-10-11)
 
 ### feat
