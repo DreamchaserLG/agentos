@@ -1,3 +1,13 @@
+## [0.13.53](https://github.com/framerslab/agentos/compare/v0.13.52...v0.13.53) (2026-10-11)
+
+### fix
+
+* **providers:** a caller's abort after a CLI has exited still ends its stream as an abort (#307) ([a08104f](https://github.com/framerslab/agentos/commit/a08104f9465348c2568d4ded7c8c29cc232fffdd))
+
+### docs
+
+* correct the ecosystem guide and the docs-alignment test's descriptions (#308) ([4e1e79f](https://github.com/framerslab/agentos/commit/4e1e79f44506a94232e6043cb1ab109c2161bf34))
+
 ## [0.13.52](https://github.com/framerslab/agentos/compare/v0.13.51...v0.13.52) (2026-10-11)
 
 ### fix
