@@ -1,3 +1,9 @@
+## [0.13.49](https://github.com/framerslab/agentos/compare/v0.13.48...v0.13.49) (2026-10-11)
+
+### fix
+
+* **memory:** the fixed cut moves on at every turn (#298) ([c3090c5](https://github.com/framerslab/agentos/commit/c3090c5d0e99afce927174b1a80d8119b771d6c9))
+
 ## [0.13.48](https://github.com/framerslab/agentos/compare/v0.13.47...v0.13.48) (2026-10-11)
 
 ### fix
