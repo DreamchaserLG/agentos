@@ -1,3 +1,9 @@
+## [0.13.48](https://github.com/framerslab/agentos/compare/v0.13.47...v0.13.48) (2026-10-11)
+
+### fix
+
+* **sandbox:** a CLI run that fails while the stream's consumer waits is no unhandled rejection (#296) ([babc568](https://github.com/framerslab/agentos/commit/babc56830afaf6ef7b30a775a11869884174520d))
+
 ## [0.13.47](https://github.com/framerslab/agentos/compare/v0.13.46...v0.13.47) (2026-10-11)
 
 ### fix
