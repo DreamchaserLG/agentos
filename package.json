@@ -420,6 +420,11 @@
       "default": "./dist/core/vector-store/IVectorStore.js",
       "types": "./dist/core/vector-store/IVectorStore.d.ts"
     },
+    "./core/storage/browser": {
+      "import": "./dist/core/storage/browser/index.js",
+      "default": "./dist/core/storage/browser/index.js",
+      "types": "./dist/core/storage/browser/index.d.ts"
+    },
     "./memory": {
       "import": "./dist/cognition/memory/index.js",
       "default": "./dist/cognition/memory/index.js",
@@ -706,6 +711,7 @@
     "eslint": "^10.12.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-import": "^2.29.1",
+    "fake-indexeddb": "6.2.5",
     "prettier": "^3.3.2",
     "quickjs-emscripten-core": "0.32.0",
     "rimraf": "^6.1.3",
