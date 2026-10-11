@@ -1,3 +1,9 @@
+## [0.13.45](https://github.com/framerslab/agentos/compare/v0.13.44...v0.13.45) (2026-10-11)
+
+### fix
+
+* **providers:** CLI bridges read the current stream shapes, end the child on early close, and keep error causes (#289) ([371f88e](https://github.com/framerslab/agentos/commit/371f88e03f5411bd6adb5d13696cd87d02eb0d45))
+
 ## [0.13.44](https://github.com/framerslab/agentos/compare/v0.13.43...v0.13.44) (2026-10-11)
 
 ### docs
