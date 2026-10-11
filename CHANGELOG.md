@@ -1,3 +1,17 @@
+## [0.13.44](https://github.com/framerslab/agentos/compare/v0.13.43...v0.13.44) (2026-10-11)
+
+### docs
+
+* twelfth round of audit follow-ups (the docs-alignment routes, the manifest paths) (#288) ([65268a8](https://github.com/framerslab/agentos/commit/65268a8a4c063ed2a976817d25d63fa4ef99dabb))
+
+### fix
+
+* **memory:** guardedFetch counts the body on the wire and reads the network's NAT64 prefixes (#287) ([984997f](https://github.com/framerslab/agentos/commit/984997f8ccb5891690431aa6a3047f81aab7f939))
+
+### test
+
+* **vision:** the model check runs the layout tier through process with its tier named (#286) ([7886ac2](https://github.com/framerslab/agentos/commit/7886ac2706d107469e866086fa124de216dcdfd2))
+
 ## [0.13.43](https://github.com/framerslab/agentos/compare/v0.13.42...v0.13.43) (2026-10-11)
 
 ### fix
