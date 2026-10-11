@@ -1,3 +1,9 @@
+## [0.13.56](https://github.com/framerslab/agentos/compare/v0.13.55...v0.13.56) (2026-10-11)
+
+### feat
+
+* **learning:** personality section on every GMI turn behind the learning flag (#294) ([b9abbff](https://github.com/framerslab/agentos/commit/b9abbff9d3c63d9d05b843ca59d57183ffaffbd3))
+
 ## [0.13.55](https://github.com/framerslab/agentos/compare/v0.13.54...v0.13.55) (2026-10-11)
 
 ### fix
