@@ -11,9 +11,13 @@ const { execaMock } = vi.hoisted(() => ({ execaMock: vi.fn() }));
 vi.mock('execa', () => ({ execa: execaMock }));
 
 import type { IProvider, ModelCompletionOptions, ModelCompletionResponse } from '../IProvider';
+import { ClaudeCodeCLIBridge } from '../implementations/ClaudeCodeCLIBridge';
 import { ClaudeCodeProvider } from '../implementations/ClaudeCodeProvider';
+import { GeminiCLIBridge } from '../implementations/GeminiCLIBridge';
 import { GeminiCLIProvider } from '../implementations/GeminiCLIProvider';
 import { isRetryableError } from '../../../../api/generateText';
+import type { CLISubprocessBridge } from '../../../../safety/sandbox/subprocess/CLISubprocessBridge';
+import type { StreamEvent } from '../../../../safety/sandbox/subprocess/types';
 
 /** The fields of an execa 10 failure that the bridges read. */
 interface ExecaFailure {
@@ -151,6 +155,9 @@ interface StreamFixture {
   /** A result line the CLI flags as an error, and the message it carries. */
   errorResult: unknown;
   errorMessage: string;
+  /** An error event line, and the message it carries. */
+  errorEvent: unknown;
+  errorEventMessage: string;
 }
 
 const STREAM_PROVIDERS: Array<(typeof PROVIDERS)[number] & { fixture: StreamFixture }> = [
@@ -177,6 +184,12 @@ const STREAM_PROVIDERS: Array<(typeof PROVIDERS)[number] & { fixture: StreamFixt
       // the failure as its result text.
       errorResult: { type: 'result', subtype: 'success', is_error: true, result: 'API Error: 401 invalid x-api-key', session_id: 's1' },
       errorMessage: 'API Error: 401 invalid x-api-key',
+      // The error line the bridge reads (ClaudeCodeCLIBridge.parseStreamEvent),
+      // with an error object as the Messages API writes one. The message types of
+      // @anthropic-ai/claude-agent-sdk 0.3.296 list no top-level error line, so
+      // this case holds the bridge to its own reading of one.
+      errorEvent: { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+      errorEventMessage: 'Overloaded',
     },
   },
   {
@@ -198,6 +211,15 @@ const STREAM_PROVIDERS: Array<(typeof PROVIDERS)[number] & { fixture: StreamFixt
         error: { type: 'FatalAuthenticationError', message: 'Request had invalid authentication credentials.' },
       },
       errorMessage: 'Request had invalid authentication credentials.',
+      // An error event of severity 'error' (ErrorEvent in packages/core/src/output/types.ts),
+      // as packages/cli/src/nonInteractiveCli.ts writes it when the session runs out of turns.
+      errorEvent: {
+        type: 'error',
+        timestamp: '2026-10-10T12:00:00.000Z',
+        severity: 'error',
+        message: 'Maximum session turns exceeded',
+      },
+      errorEventMessage: 'Maximum session turns exceeded',
     },
   },
 ];
@@ -297,4 +319,302 @@ describe.each(STREAM_PROVIDERS)('$name: how a stream ends', ({ binary, model, cr
       expect(finals[0].error).toMatchObject({ code: 'CRASHED', message: expect.stringContaining(fixture.errorMessage) });
     },
   );
+
+  it('ends with the error event the CLI writes, not the failed exit that follows it', async () => {
+    // The exit alone would classify as RATE_LIMITED from this stderr.
+    const finals = (
+      await streamOf([fixture.hello[0], fixture.errorEvent], 1, { stderr: 'Error: Rate Limit exceeded, try again later' })
+    ).filter((chunk) => chunk.isFinal);
+
+    expect(finals).toHaveLength(1);
+    expect(finals[0].choices).toEqual([]);
+    expect(finals[0].error?.message).toContain(fixture.errorEventMessage);
+    expect(finals[0].error?.code).not.toBe('RATE_LIMITED');
+  });
+});
+
+/**
+ * stream-json as the current Gemini CLI writes it (google-gemini/gemini-cli at
+ * 9b6e0265: the event types in packages/core/src/output/types.ts, written by
+ * packages/cli/src/nonInteractiveCli.ts): an init event, the prompt echoed as
+ * a user message, the reply as assistant message deltas, and a result event
+ * that carries no text and has its token counts in `stats`.
+ */
+describe('GeminiCLIProvider: the stream-json the current Gemini CLI writes', () => {
+  const at = '2026-10-10T12:00:00.000Z';
+  const stats = {
+    total_tokens: 15,
+    input_tokens: 12,
+    output_tokens: 3,
+    cached: 0,
+    input: 12,
+    duration_ms: 840,
+    tool_calls: 0,
+    models: { 'gemini-3.5-flash': { total_tokens: 15, input_tokens: 12, output_tokens: 3, cached: 0, input: 12 } },
+  };
+  const opening = [
+    { type: 'init', timestamp: at, session_id: 'g1', model: 'gemini-3.5-flash' },
+    { type: 'message', timestamp: at, role: 'user', content: 'Hello' },
+  ];
+
+  async function streamOf(lines: unknown[]): Promise<ModelCompletionResponse[]> {
+    stubCli('gemini', () => cliRun(lines, 0));
+    const provider = new GeminiCLIProvider();
+    await provider.initialize({});
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream('gemini-3.5-flash', HELLO, {})) chunks.push(chunk);
+    return chunks;
+  }
+
+  it('passes on the reply written as assistant message deltas, with the token counts of the result stats', async () => {
+    const chunks = await streamOf([
+      ...opening,
+      { type: 'message', timestamp: at, role: 'assistant', content: 'Hi ', delta: true },
+      { type: 'message', timestamp: at, role: 'assistant', content: 'there', delta: true },
+      { type: 'result', timestamp: at, status: 'success', stats },
+    ]);
+    const final = chunks[chunks.length - 1];
+
+    // The echoed prompt is not reply text.
+    expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual(['Hi ', 'there']);
+    expect(final.error).toBeUndefined();
+    expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hi there' } }] });
+    expect(final.usage).toMatchObject({ promptTokens: 12, completionTokens: 3, totalTokens: 15 });
+  });
+
+  it('goes on past an error event the CLI marks as a warning', async () => {
+    const chunks = await streamOf([
+      ...opening,
+      { type: 'message', timestamp: at, role: 'assistant', content: 'Hi there', delta: true },
+      // What the CLI writes when it stops a loop; the run then ends with a success result.
+      { type: 'error', timestamp: at, severity: 'warning', message: 'Loop detected, stopping execution' },
+      { type: 'result', timestamp: at, status: 'success', stats },
+    ]);
+    const final = chunks[chunks.length - 1];
+
+    expect(final.error).toBeUndefined();
+    expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hi there' } }] });
+  });
+});
+
+/**
+ * A run whose outcome only the code under test can observe. vi.fn() attaches
+ * handlers of its own to a Promise its implementation returns (the
+ * settledResults record, @vitest/spy 5.0.3 src/index.ts), which would hide a
+ * rejection the bridge leaves unhandled. The run is therefore a plain object
+ * with the outcome's then, catch and finally bound to it, which the bridge
+ * awaits as it awaits execa's subprocess. The CLI writes `lines` and runs on
+ * until `exit` ends it; a non-zero code rejects the outcome as execa does.
+ */
+function unobservedRun(lines: unknown[]) {
+  let settle!: (code: number) => void;
+  const outcome = new Promise<unknown>((resolve, reject) => {
+    settle = (code) =>
+      code === 0
+        ? resolve({ failed: false, exitCode: 0, stdout: '', stderr: '' })
+        : reject(execaError({ exitCode: code }));
+  });
+  const subprocess = {
+    then: (onFulfilled?: any, onRejected?: any) => outcome.then(onFulfilled, onRejected),
+    catch: (onRejected?: any) => outcome.catch(onRejected),
+    finally: (onFinally?: any) => outcome.finally(onFinally),
+    stdout: (async function* () {
+      for (const line of lines) yield Buffer.from(`${JSON.stringify(line)}\n`);
+    })(),
+    kill: vi.fn(),
+  };
+  return { subprocess, exit: (code: number) => settle(code) };
+}
+
+describe.each(STREAM_PROVIDERS)('$name: a consumer that stops reading the stream early', ({ binary, model, create, fixture }) => {
+  it('ends the CLI, and a non-zero exit that follows is no unhandled rejection', async () => {
+    // The CLI has written the first piece of its reply and has more to write.
+    const run = unobservedRun([fixture.hello[0], fixture.hello[0]]);
+    stubCli(binary, () => run.subprocess);
+    const provider = create();
+    await provider.initialize({});
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+
+    try {
+      const chunks: ModelCompletionResponse[] = [];
+      for await (const chunk of provider.generateCompletionStream(model, HELLO, {})) {
+        chunks.push(chunk);
+        break;
+      }
+      run.exit(1);
+      // Node reports a rejection nothing handles once the microtasks of the turn have run.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // While a test listens for unhandledRejection, Vitest leaves such a
+      // rejection to it (runtime/moduleRunner/errorCatcher.ts in vitest 5.0.3),
+      // so this listener is where it shows.
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(run.subprocess.kill).toHaveBeenCalled();
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0].isFinal).toBe(false);
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+});
+
+describe('ClaudeCodeProvider: an error result with no result text', () => {
+  it('ends the stream with the error subtype and the errors the CLI lists', async () => {
+    // SDKResultError in @anthropic-ai/claude-agent-sdk 0.3.296 (sdk.d.ts): the
+    // error subtypes carry no result; their detail is in errors.
+    stubCli('claude', () =>
+      cliRun(
+        [
+          {
+            type: 'result',
+            subtype: 'error_during_execution',
+            is_error: true,
+            num_turns: 1,
+            errors: ['Request timed out', 'Retries used up'],
+            session_id: 's1',
+          },
+        ],
+        1,
+      ),
+    );
+    const provider = new ClaudeCodeProvider();
+    await provider.initialize({});
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream('claude-sonnet-4-6', HELLO, {})) chunks.push(chunk);
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toMatchObject({
+      isFinal: true,
+      choices: [],
+      error: {
+        code: 'CRASHED',
+        message: 'Claude Code returned an error: error_during_execution: Request timed out; Retries used up',
+      },
+    });
+  });
+
+  it('reads the listed errors as the SDK does: each trimmed, a blank one left out', async () => {
+    // The SDK's own reader of an error result (Query.readMessages in
+    // @anthropic-ai/claude-agent-sdk 0.3.296, sdk.mjs) trims each entry of
+    // errors and drops the blank ones before it joins them with '; '. The
+    // result of a startup failure carries the text the CLI wrote to stderr
+    // (startup_failure_reason in sdk.d.ts).
+    stubCli('claude', () =>
+      cliRun(
+        [
+          {
+            type: 'result',
+            subtype: 'error_during_execution',
+            is_error: true,
+            num_turns: 0,
+            errors: ['The working directory is unavailable: /srv/app\n', '  '],
+            startup_failure_reason: 'cwd_unavailable',
+            session_id: 's1',
+          },
+        ],
+        1,
+      ),
+    );
+    const provider = new ClaudeCodeProvider();
+    await provider.initialize({});
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream('claude-sonnet-4-6', HELLO, {})) chunks.push(chunk);
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toMatchObject({
+      isFinal: true,
+      choices: [],
+      error: {
+        code: 'CRASHED',
+        message: 'Claude Code returned an error: error_during_execution: The working directory is unavailable: /srv/app',
+      },
+    });
+  });
+});
+
+/**
+ * StreamEvent is exported (@framers/agentos/sandbox/subprocess), so a host can
+ * read a bridge's stream itself. Before 0.13.41 an error result's `result` was
+ * the CLI's own result text, '' when it wrote none. 0.13.41 put the failure's
+ * message there, which a host that does not read `isError` takes for a reply;
+ * `result` keeps the CLI's own text, and the message has a field of its own.
+ */
+describe('A direct consumer of a CLI bridge: a result the CLI flags as an error', () => {
+  it.each<{ name: string; binary: string; create: () => CLISubprocessBridge; line: unknown; expected: object }>([
+    {
+      name: 'GeminiCLIBridge, the result the CLI writes before a failed exit',
+      binary: 'gemini',
+      create: () => new GeminiCLIBridge(),
+      line: {
+        type: 'result',
+        timestamp: '2026-10-10T12:00:00.000Z',
+        status: 'error',
+        error: { type: 'FatalAuthenticationError', message: 'Request had invalid authentication credentials.' },
+      },
+      expected: { type: 'result', result: '', isError: true, error: 'Request had invalid authentication credentials.' },
+    },
+    {
+      name: 'ClaudeCodeCLIBridge, an error subtype with no result text',
+      binary: 'claude',
+      create: () => new ClaudeCodeCLIBridge(),
+      line: { type: 'result', subtype: 'error_max_turns', is_error: true, num_turns: 2, errors: ['Reached the turn limit'], session_id: 's1' },
+      expected: { type: 'result', result: '', isError: true, error: 'error_max_turns: Reached the turn limit' },
+    },
+    {
+      name: 'ClaudeCodeCLIBridge, an API error whose result text is the error',
+      binary: 'claude',
+      create: () => new ClaudeCodeCLIBridge(),
+      line: { type: 'result', subtype: 'success', is_error: true, result: 'API Error: 401 invalid x-api-key', session_id: 's1' },
+      expected: { type: 'result', result: 'API Error: 401 invalid x-api-key', isError: true, error: 'API Error: 401 invalid x-api-key' },
+    },
+  ])('$name: result as before 0.13.41, the message in error', async ({ binary, create, line, expected }) => {
+    stubCli(binary, () => cliRun([line], 1));
+    const events: StreamEvent[] = [];
+    const reading = (async () => {
+      for await (const event of create().stream({ prompt: 'Hello' })) events.push(event);
+    })();
+
+    await expect(reading).rejects.toMatchObject({ code: 'CRASHED' });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject(expected);
+  });
+});
+
+/**
+ * stream-json as Claude Code writes it with --include-partial-messages, which
+ * the bridge passes: each Messages API stream event wrapped as
+ * { type: 'stream_event', event }, then the complete assistant message, whose
+ * content is a list of blocks (SDKPartialAssistantMessage and
+ * SDKAssistantMessage in @anthropic-ai/claude-agent-sdk 0.3.296, sdk.d.ts).
+ */
+describe('ClaudeCodeProvider: the stream-json Claude Code writes with partial messages', () => {
+  it('passes on the text deltas nested under stream_event, and the complete message after them once', async () => {
+    const frame = { parent_tool_use_id: null, session_id: 's1' };
+    const message = { id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6', stop_reason: null };
+    stubCli('claude', () =>
+      cliRun(
+        [
+          { type: 'stream_event', event: { type: 'message_start', message: { ...message, content: [] } }, ...frame },
+          { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hi ' } }, ...frame },
+          { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'there' } }, ...frame },
+          { type: 'stream_event', event: { type: 'content_block_stop', index: 0 }, ...frame },
+          { type: 'assistant', message: { ...message, content: [{ type: 'text', text: 'Hi there' }] }, ...frame },
+          { type: 'stream_event', event: { type: 'message_stop' }, ...frame },
+          { type: 'result', subtype: 'success', is_error: false, result: 'Hi there', session_id: 's1', usage: { input_tokens: 12, output_tokens: 3 } },
+        ],
+        0,
+      ),
+    );
+    const provider = new ClaudeCodeProvider();
+    await provider.initialize({});
+    const chunks: ModelCompletionResponse[] = [];
+    for await (const chunk of provider.generateCompletionStream('claude-sonnet-4-6', HELLO, {})) chunks.push(chunk);
+    const final = chunks[chunks.length - 1];
+
+    expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual(['Hi ', 'there']);
+    expect(final.error).toBeUndefined();
+    expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hi there' } }] });
+  });
 });
