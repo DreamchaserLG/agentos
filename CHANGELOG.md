@@ -1,3 +1,9 @@
+## [0.13.46](https://github.com/framerslab/agentos/compare/v0.13.45...v0.13.46) (2026-10-11)
+
+### feat
+
+* **hearing:** audio pieces in the page, by packet copy or decoded to 16 kHz mono (#285) ([ba2b7d9](https://github.com/framerslab/agentos/commit/ba2b7d9a53a5001883535fcb0d3f26fb26ffd617))
+
 ## [0.13.45](https://github.com/framerslab/agentos/compare/v0.13.44...v0.13.45) (2026-10-11)
 
 ### fix
