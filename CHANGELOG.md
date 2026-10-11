@@ -1,3 +1,9 @@
+## [0.13.51](https://github.com/framerslab/agentos/compare/v0.13.50...v0.13.51) (2026-10-11)
+
+### fix
+
+* **memory:** guardedFetch reads an answer with no Content-Type as application/octet-stream (#305) ([f8fd71f](https://github.com/framerslab/agentos/commit/f8fd71f4e1d02048452dc8b207540262b918432e))
+
 ## [0.13.50](https://github.com/framerslab/agentos/compare/v0.13.49...v0.13.50) (2026-10-11)
 
 ### feat
