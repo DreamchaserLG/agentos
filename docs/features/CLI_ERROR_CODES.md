@@ -72,13 +72,13 @@ The table lists where the built-in bridges and providers raise each code and the
 | `NOT_AUTHENTICATED` | Provider `initialize()`; `classifyError()` on stderr text | `false` |
 | `VERSION_OUTDATED` | Nothing | Not set |
 | `SPAWN_FAILED` | `classifyError()` on `EACCES` | `false` |
-| `TIMEOUT` | `classifyError()` on a timeout or a signal | `true` |
-| `CRASHED` | `classifyError()` for every other failure; provider `generateCompletion()` on an error result | `true` |
+| `TIMEOUT` | `classifyError()` on a timeout, or on a signal other than the caller's abort | `true` |
+| `CRASHED` | `classifyError()` for every other failure; provider `generateCompletion()` and `generateCompletionStream()` on an error result | `true` |
 | `RATE_LIMITED` | `classifyError()` on stderr text | `true` |
 | `PERMISSION_DENIED` | Nothing | Not set |
 | `CONTEXT_TOO_LONG` | `classifyError()` on stderr text | `false` |
 
-`classifyError()` in both bridges ([`ClaudeCodeCLIBridge.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/ClaudeCodeCLIBridge.ts), [`GeminiCLIBridge.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/GeminiCLIBridge.ts)) checks its conditions in one order and returns the first that matches: a timeout or a signal, authentication, rate limit, context length, `ENOENT`, `EACCES`, and `CRASHED` when none does. The text checks are case-sensitive substring matches on the process's stderr.
+`classifyError()` in both bridges ([`ClaudeCodeCLIBridge.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/ClaudeCodeCLIBridge.ts), [`GeminiCLIBridge.ts`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/GeminiCLIBridge.ts)) checks its conditions in one order and returns the first that matches: a call cancelled through its abort signal, a timeout or a signal, authentication, rate limit, context length, `ENOENT`, `EACCES`, and `CRASHED` when none does. The text checks are substring matches on the process's stderr, lowercased first, so the case of the CLI's wording does not matter.
 
 ### BINARY_NOT_FOUND
 
@@ -91,7 +91,7 @@ To fix it, install the CLI (`npm install -g @anthropic-ai/claude-code` or `npm i
 ### NOT_AUTHENTICATED
 
 - `initialize()` throws it when the bridge's `checkAuthenticated()` returns `false`. The check pipes a one-line prompt (`Reply with exactly: pong`) through the CLI with a 30-second timeout, and any failure of that run reads as not authenticated: a timeout, a rate limit or a crash as well as a missing login.
-- `classifyError()` returns it when stderr contains `not logged in`, `authentication` or `unauthorized`; the Gemini bridge also matches `sign in`.
+- `classifyError()` returns it when stderr contains `not logged in`, `authentication` or `unauthorized`, in any case; the Gemini bridge also matches `sign in`.
 - `checkHealth()` reports it without throwing, as `details.error: 'NOT_AUTHENTICATED'`.
 
 To fix it, run `claude` or `gemini` in a terminal and complete the login. When the login is in place and `initialize()` still throws this code, run the CLI by hand to see the failure the check reported as a missing login.
@@ -109,7 +109,7 @@ No AgentOS code raises it. The constant and both providers' code types declare i
 `classifyError()` returns it when [execa](https://github.com/sindresorhus/execa), which runs the process, marks the failed run `timedOut` or `isTerminated`:
 
 - `timedOut` means the run passed its `timeout`, a field of the `BridgeOptions` given to `execute()` or `stream()` (120000 ms when unset). The two providers pass their `requestTimeout` config value, also 120000 ms by default.
-- `isTerminated` is true whenever a signal ended the process ([`result.js`](https://github.com/sindresorhus/execa/blob/v10.0.1/lib/return/result.js) in execa 10.0.1). A call cancelled through `abortSignal` therefore carries this code when the signal execa sends ends the process, and so does a process killed from outside.
+- `isTerminated` is true whenever a signal ended the process ([`result.js`](https://github.com/sindresorhus/execa/blob/v10.0.1/lib/return/result.js) in execa 10.0.1), so a process killed from outside carries this code. A call cancelled through `abortSignal` is ended by a signal too, but execa also marks it `isCanceled`, and the bridges report it as `REQUEST_ABORTED` ([Codes Outside CLI_ERROR](#codes-outside-cli_error)).
 
 To allow more time, pass a larger `timeout` to a bridge you call yourself, or set `requestTimeout` in the config the provider is initialized with. `generateText()` and the other helpers initialize the provider with a key and a base URL only, so their CLI calls run on the default.
 
@@ -117,10 +117,11 @@ To allow more time, pass a larger `timeout` to a bridge you call yourself, or se
 
 - `classifyError()` returns it for every failure the earlier checks do not match, a non-zero exit code among them. Its `guidance` ends with the last 500 characters of stderr.
 - The providers' `generateCompletion()` throws it when the CLI exits normally and its JSON result carries `is_error: true`.
+- The providers' `generateCompletionStream()` ends with it when the CLI flags its `stream-json` result as an error: `is_error: true` from Claude Code, `status: 'error'` from the Gemini CLI. The message is `Claude Code returned an error:` or `Gemini CLI returned an error:` followed by the CLI's own message for the failure.
 
 ### RATE_LIMITED
 
-`classifyError()` returns it when stderr contains `rate limit`, `too many requests` or `429`; the Gemini bridge also matches `quota` and `RESOURCE_EXHAUSTED`. Its `guidance` says to wait a few minutes and try again.
+`classifyError()` returns it when stderr contains `rate limit`, `too many requests` or `429`, in any case; the Gemini bridge also matches `quota` and `RESOURCE_EXHAUSTED`. Its `guidance` says to wait a few minutes and try again.
 
 ### PERMISSION_DENIED
 
@@ -128,7 +129,7 @@ No AgentOS code raises it, and the providers' code types leave it out. The built
 
 ### CONTEXT_TOO_LONG
 
-`classifyError()` returns it when stderr contains `context` together with `too long` or `token limit`; the Gemini bridge also accepts `exceeds`. Start a new conversation or use a model with a larger context window.
+`classifyError()` returns it when stderr contains `context` together with `too long` or `token limit`, in any case; the Gemini bridge also accepts `exceeds`. Start a new conversation or use a model with a larger context window.
 
 ---
 
@@ -138,6 +139,7 @@ The two providers' code types add codes of their own ([`ClaudeCodeProviderError.
 
 | Code | Provider | Raised when |
 |------|----------|-------------|
+| `REQUEST_ABORTED` | Both | A call is cancelled through its `abortSignal`: `classifyError()` returns it, with `recoverable: false`, for a run execa marks `isCanceled`. It is the code the HTTP providers give a caller's abort, and `isRetryableError()` never counts it as retryable |
 | `EMBEDDINGS_NOT_SUPPORTED` | Both | `generateEmbeddings()` is called: neither provider serves embeddings |
 | `UNKNOWN` | Both | A completion is requested while the provider is not initialized |
 | `SCHEMA_PARSE_FAILED` | Claude Code | Never. `generateCompletion()` retries a reply that does not parse as the tool-call shape once without the schema and returns it as text; the streaming path returns such a reply as text |
@@ -173,11 +175,14 @@ new CLISubprocessError(
 
 - **Bridge.** `execute()` and `stream()` throw the error `classifyError()` returns.
 - **Provider, non-streaming.** `generateCompletion()` lets the bridge's error through.
-- **Provider, streaming.** `generateCompletionStream()` does not throw when the bridge fails or when the CLI reports an error in its output. Either way the stream ends with a final chunk that carries an `error`:
-  - When the bridge throws, the `error` holds the error's message, its `code` and, as `details`, the error object.
+- **Provider, streaming.** `generateCompletionStream()` reads the bridge's stream to its end, where the bridge awaits the CLI's exit, and yields its final chunk after that. It does not throw when the bridge fails or when the CLI reports an error in its output. Either way the stream ends with a final chunk that carries an `error`:
+  - When the bridge throws, the `error` holds the error's message, its `code` and, as `details`, the error object. A non-zero exit after the CLI's result line ends the stream this way, in place of the reply. A call cancelled through `abortSignal` ends it this way too, with `type: 'abort'` beside the `REQUEST_ABORTED` code: the chunk the `abortSignal` contract of `IProvider` asks a streaming provider for, which the completion gateway and `streamText()` read as the caller's own stop.
+  - When the CLI flags its result as an error, the `error` holds the [`CRASHED`](#crashed) error `generateCompletion()` throws for an error result: its message, its `code` and, as `details`, the error object.
   - When the CLI writes an error event into its `stream-json` output, the `error` holds only a message: `Claude Code stream error:` or `Gemini CLI stream error:` followed by the event's message. It has no `code` and no `details`.
+
+  When the CLI reports the failure in its output, as an error result or an error event, a non-zero exit that follows does not replace that error.
 - **Initialization through the helpers.** `generateText()`, `streamText()` and the helpers built on them create the provider with [`createProviderManager()`](https://github.com/framerslab/agentos/blob/master/src/api/model.ts). When the provider's `initialize()` throws, that function throws a `ProviderInitializationError` whose `cause` is the `CLISubprocessError`.
-- **Fallback.** Those helpers decide whether to try the next provider with [`isRetryableError()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts), which reads the error's name, HTTP status, `code`, type and message. It counts a `ProviderInitializationError` and the `TIMEOUT` code as retryable, and it never reads `recoverable`.
+- **Fallback.** Those helpers decide whether to try the next provider with [`isRetryableError()`](https://github.com/framerslab/agentos/blob/master/src/api/generateText.ts), which reads the error's name, HTTP status, `code`, type and message. It counts a `ProviderInitializationError` and the `TIMEOUT` code as retryable and `REQUEST_ABORTED` as not, and it never reads `recoverable`.
 
 `guidance` and `recoverable` are for the host that catches the error: show `guidance` to the person who can fix the installation, and treat `recoverable` as the bridge's own hint when you write a retry of your own.
 
