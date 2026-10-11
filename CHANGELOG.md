@@ -1,3 +1,20 @@
+## [0.13.40](https://github.com/framerslab/agentos/compare/v0.13.39...v0.13.40) (2026-10-11)
+
+### feat
+
+* **auth:** OAuth for a web server: a redirect flow, sealed secrets and a sealed token store (#242) ([59a20d1](https://github.com/framerslab/agentos/commit/59a20d146ab771785db76e704bc0bd0cd8a002e4))
+* **voice-pipeline:** build a speech-to-text chain from provider entries (#176) ([29046f2](https://github.com/framerslab/agentos/commit/29046f2ab257b61ab77437d91b4b2e02519fc682))
+
+### fix
+
+* **images:** a local A1111 edit reports the checkpoint the server rendered with (#279) ([3744044](https://github.com/framerslab/agentos/commit/37440440170ae8c95eab72d0199adee61152aa7e))
+* **images:** the untrusted image fetch closes six gaps a security review found (#278) ([b99ecbc](https://github.com/framerslab/agentos/commit/b99ecbcc5c4a9b56f5cb6749ae754bb02747a463))
+* **memory:** the guarded fetch's deadline covers decoding, and a network refusal names no resolver detail (#280) ([7d8bc9e](https://github.com/framerslab/agentos/commit/7d8bc9e7c4e968805360d4d4d2ea4b243466c5be))
+
+### docs
+
+* eleventh round of audit follow-ups (two pages published, the agent() and gmi() guides aligned) (#264) ([d4d3c6d](https://github.com/framerslab/agentos/commit/d4d3c6dcb7e59df3030e60210e70d48c7a05ebb7))
+
 ## [0.13.39](https://github.com/framerslab/agentos/compare/v0.13.38...v0.13.39) (2026-10-11)
 
 ### feat
