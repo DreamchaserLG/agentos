@@ -1,3 +1,9 @@
+## [0.13.43](https://github.com/framerslab/agentos/compare/v0.13.42...v0.13.43) (2026-10-11)
+
+### fix
+
+* **images:** the inline size limit counts characters outside ASCII, which Node decodes by their low byte (#284) ([26acf47](https://github.com/framerslab/agentos/commit/26acf47141226d3acb5c0635c1292971f8be65f3))
+
 ## [0.13.42](https://github.com/framerslab/agentos/compare/v0.13.41...v0.13.42) (2026-10-11)
 
 ### feat
