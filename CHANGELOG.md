@@ -1,3 +1,9 @@
+## [0.13.38](https://github.com/framerslab/agentos/compare/v0.13.37...v0.13.38) (2026-10-11)
+
+### feat
+
+* **voice-pipeline:** add an OpenAI Realtime transcription provider with item-keyed transcripts and connection rollover (#200) ([c253939](https://github.com/framerslab/agentos/commit/c2539394937e27ef58aa462e17e62c968262ed6c))
+
 ## [0.13.37](https://github.com/framerslab/agentos/compare/v0.13.36...v0.13.37) (2026-10-10)
 
 ### fix
