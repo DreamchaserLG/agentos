@@ -1,3 +1,9 @@
+## [0.13.47](https://github.com/framerslab/agentos/compare/v0.13.46...v0.13.47) (2026-10-11)
+
+### fix
+
+* **memory:** review follow-ups for front matter read as data (#293) ([a4ee306](https://github.com/framerslab/agentos/commit/a4ee306910cacd22fb03885c60c5e93c9aac9273))
+
 ## [0.13.46](https://github.com/framerslab/agentos/compare/v0.13.45...v0.13.46) (2026-10-11)
 
 ### feat
