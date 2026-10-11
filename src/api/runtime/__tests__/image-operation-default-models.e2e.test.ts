@@ -10,6 +10,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { editImage } from '../editImage.js';
+import { generateImage } from '../generateImage.js';
+import { transferStyle } from '../../transferStyle.js';
 import { upscaleImage } from '../upscaleImage.js';
 import { variateImage } from '../variateImage.js';
 
@@ -29,6 +31,97 @@ const replicateDone = () => json({ id: 'p1', status: 'succeeded', output: ['http
 describe('an image operation with a provider and no model', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('generates on OpenAI with GPT Image 2.5 Flare, and sends DALL·E 3 settings as that model takes them', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => json({ created: 1, data: [{ b64_json: 'Z2Vu' }] }));
+
+    const result = await generateImage({
+      provider: 'openai',
+      apiKey: 'sk-openai',
+      prompt: 'A lighthouse at dusk.',
+      size: '1792x1024',
+      quality: 'hd',
+      providerOptions: { openai: { style: 'vivid' } },
+    });
+
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(String(url)).toMatch(/\/images\/generations$/);
+    const body = JSON.parse(String(init?.body));
+    // OpenAI retired the DALL·E models and retires gpt-image-1 on 2026-10-23.
+    expect(body.model).toBe('gpt-image-2.5-flare');
+    // `hd` was DALL·E 3's name for `high`, and `style` was DALL·E 3's alone.
+    expect(body.quality).toBe('high');
+    expect(body).not.toHaveProperty('style');
+    expect(body.size).toBe('1792x1024');
+    expect(result.model).toBe('gpt-image-2.5-flare');
+  });
+
+  it('keeps the quality and the style a call gives a model that is not a GPT Image model', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => json({ created: 1, data: [{ url: 'https://images.example/out.png' }] }));
+
+    await generateImage({
+      provider: 'openai',
+      model: 'gateway-image-model',
+      apiKey: 'sk-gateway',
+      baseUrl: 'https://gateway.example/v1',
+      prompt: 'A lighthouse at dusk.',
+      quality: 'hd',
+      providerOptions: { openai: { style: 'natural' } },
+    });
+
+    const body = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body));
+    expect(body).toMatchObject({ model: 'gateway-image-model', quality: 'hd', style: 'natural' });
+  });
+
+  it('edits and transfers a style on OpenAI with GPT Image 2.5 Sunburst', async () => {
+    for (const name of ['REPLICATE_API_TOKEN', 'FAL_API_KEY', 'STABILITY_API_KEY']) vi.stubEnv(name, '');
+    vi.stubEnv('OPENAI_API_KEY', 'sk-openai-env');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => json({ created: 1, data: [{ b64_json: 'ZWRpdA==' }] }));
+
+    const style = { image: TINY_PNG, styleReference: TINY_PNG, prompt: 'In the style of the reference.' };
+    const edited = await editImage({ provider: 'openai', apiKey: 'sk-openai', image: TINY_PNG, prompt: 'Add a hat.' });
+    const named = await transferStyle({ provider: 'openai', apiKey: 'sk-openai', ...style });
+    // With no provider named, style transfer walks its own list, and OpenAI
+    // is the one with a key here.
+    const found = await transferStyle(style);
+
+    for (const [url, init] of fetchSpy.mock.calls) {
+      expect(String(url)).toMatch(/\/images\/edits$/);
+      expect((init?.body as FormData).get('model')).toBe('gpt-image-2.5-sunburst');
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    for (const result of [edited, named, found]) expect(result.model).toBe('gpt-image-2.5-sunburst');
+  });
+
+  it('transfers a style on Stability with an SD3 model, the provider named or found in the environment', async () => {
+    for (const name of ['REPLICATE_API_TOKEN', 'FAL_API_KEY', 'OPENAI_API_KEY']) vi.stubEnv(name, '');
+    vi.stubEnv('STABILITY_API_KEY', 'sk-stab-env');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => json({ image: 'c3R5bGVk', seed: 1, finish_reason: 'SUCCESS' }));
+
+    const style = { image: TINY_PNG, styleReference: TINY_PNG, prompt: 'In the style of the reference.' };
+    const named = await transferStyle({ provider: 'stability', apiKey: 'sk-stab', ...style });
+    const found = await transferStyle(style);
+
+    // The edit goes to the SD3 route, whose `model` takes the sd3.5 names
+    // only: neither stable-image-core nor the SDXL text-to-image default.
+    for (const [url, init] of fetchSpy.mock.calls) {
+      expect(String(url)).toMatch(/\/v2beta\/stable-image\/generate\/sd3$/);
+      const form = init?.body as FormData;
+      expect(form.get('mode')).toBe('image-to-image');
+      expect(form.get('model')).toBe('sd3.5-medium');
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    for (const result of [named, found]) expect(result.model).toBe('sd3.5-medium');
   });
 
   it('upscales on Replicate with real-esrgan, not its text-to-image model', async () => {
@@ -157,9 +250,9 @@ describe('an image operation with a provider and no model', () => {
     const [url, init] = fetchSpy.mock.calls[0];
     expect(String(url)).toMatch(/\/images\/edits$/);
     const form = init?.body as FormData;
-    expect(form.get('model')).toBe('gpt-image-1');
+    expect(form.get('model')).toBe('gpt-image-2.5-sunburst');
     expect(String(form.get('prompt'))).toContain('close variation');
-    expect(result.model).toBe('gpt-image-1');
+    expect(result.model).toBe('gpt-image-2.5-sunburst');
     expect(result.images).toHaveLength(1);
   });
 
