@@ -1,3 +1,9 @@
+## [0.13.55](https://github.com/framerslab/agentos/compare/v0.13.54...v0.13.55) (2026-10-11)
+
+### fix
+
+* **memory:** guardedFetch tries the next checked address when the first cannot be reached (#314) ([a48b696](https://github.com/framerslab/agentos/commit/a48b69656eaa6608e4eadfd0257584833fbfb9d4))
+
 ## [0.13.54](https://github.com/framerslab/agentos/compare/v0.13.53...v0.13.54) (2026-10-11)
 
 ### fix
