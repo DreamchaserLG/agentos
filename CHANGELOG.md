@@ -1,3 +1,14 @@
+## [0.13.71](https://github.com/framerslab/agentos/compare/v0.13.70...v0.13.71) (2026-10-12)
+
+### fix
+
+* **images:** Fal edits run on Flux Dev's edit endpoints, and Flux Redux takes its reference as redux_image (#351) ([164d242](https://github.com/framerslab/agentos/commit/164d242211e366a31fc01062f02e974722c04263)), closes [included](https://github.com/framerslab/agentos/issues/included)
+
+### docs
+
+* add the method draft of the GMI versus agent() paper (#349) ([288c3ca](https://github.com/framerslab/agentos/commit/288c3cacca1f85be74bcf1e799549eb66dc0d23c))
+* correct the sources of the GMI paper's result tables (#353) ([51f6a71](https://github.com/framerslab/agentos/commit/51f6a71d084fc21b759cd807cc04dce88a91e8bd))
+
 ## [0.13.70](https://github.com/framerslab/agentos/compare/v0.13.69...v0.13.70) (2026-10-12)
 
 ### fix
