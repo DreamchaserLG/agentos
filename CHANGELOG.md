@@ -1,3 +1,9 @@
+## [0.13.73](https://github.com/framerslab/agentos/compare/v0.13.72...v0.13.73) (2026-10-12)
+
+### fix
+
+* **api:** a key goes only to the provider the call names, and each key has its own breaker (#350) ([4653d9d](https://github.com/framerslab/agentos/commit/4653d9d733a6cf0c85fe3310cf114134e267f21b))
+
 ## [0.13.72](https://github.com/framerslab/agentos/compare/v0.13.71...v0.13.72) (2026-10-12)
 
 ### fix
