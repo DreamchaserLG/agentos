@@ -79,7 +79,7 @@ AgentOS exports an [`OpenAIOAuthFlow`](https://github.com/framerslab/agentos/blo
 - **Auth**: User logs into Claude Code separately by running `claude` in terminal
 - **System prompt**: `--system-prompt` flag (direct)
 - **Tool calling**: tool schemas written into the system prompt; when tools are present, `--json-schema` constrains the reply to text or tool calls. Claude Code returns that reply in the result's `structured_output`, which the provider reads first; it parses the result text when there is none (a reply that does not parse as that shape is retried once without the schema and returned as text)
-- **Streaming**: `--output-format stream-json` with `--verbose --include-partial-messages`; the reply's text arrives as `stream_event` lines that wrap the Messages API's `content_block_delta` events, and the `result` line closes the turn. With tools, a text reply that comes only in the result's `structured_output` goes out as one text delta once the CLI has exited, just before the final chunk, so `streamText()` reads it
+- **Streaming**: `--output-format stream-json` with `--verbose --include-partial-messages`; the reply's text arrives as `stream_event` lines that wrap the Messages API's `content_block_delta` events, and the `result` line closes the turn. With tools, a text reply in the result's `structured_output` that the text deltas did not already carry (none came, or only text the model wrote before the reply, such as whitespace) goes out as one text delta once the CLI has exited, just before the final chunk, so `streamText()` reads it once
 - **Key flags**: `--bare` (skip plugins/hooks), `--max-turns 1` (single completion)
 - **Models**: claude-opus-5-5, claude-fable-5-1, claude-fable-5, claude-sonnet-5-5, claude-sonnet-5, claude-sonnet-4-6 (default), claude-haiku-4-5-20251001
 - **Cost**: $0 per token (subscription)
@@ -90,8 +90,8 @@ AgentOS exports an [`OpenAIOAuthFlow`](https://github.com/framerslab/agentos/blo
 - **Binary**: `gemini` (install: `npm install -g @google/gemini-cli`)
 - **Auth**: User logs in via Google account by running `gemini` in terminal
 - **System prompt**: Temp file + `GEMINI_SYSTEM_MD` env var (no `--system-prompt` flag)
-- **Tool calling**: XML prompt-based with `<tool_call>` markers (no `--json-schema` support)
-- **Streaming**: `--output-format stream-json`; the reply's text arrives as `message` events (`role: 'assistant'`, `delta: true`) and the token counts in the `result` event's `stats`. The session id comes on the `init` event that opens the stream, and the bridge gives it to the result, which carries none. An `error` event of `severity: 'warning'` does not end the stream
+- **Tool calling**: XML prompt-based with `<tool_call>` markers (no `--json-schema` support); the provider reads the tool calls from the whole reply once it has ended
+- **Streaming**: `--output-format stream-json`; the reply's text arrives as `message` events (`role: 'assistant'`, `delta: true`) and the token counts in the `result` event's `stats`. The session id comes on the `init` event that opens the stream, and the bridge gives it to the result, which carries none. An `error` event of `severity: 'warning'` does not end the stream. With tools, the reply's text streams without its `<tool_call>` blocks, which arrive as the final chunk's tool calls alone: text from a `<` that may open a block is held back until the block's closing tag shows whether it is one, and text still held when the reply ends goes out as one text delta just before the final chunk
 - **Key flags**: `-p` (headless), `-m` (model selection)
 - **Models**: gemini-3.5-flash (default), gemini-3.1-pro-preview, gemini-3.5-flash-lite, gemini-2.5-flash-lite. The CLI answers gemini-2.5-flash with gemini-3.5-flash and returns 404 for gemini-2.5-pro.
 - **Cost**: $0 per token (Google account — free tier: 60 req/min, 1000 req/day; higher with AI Pro/Ultra)

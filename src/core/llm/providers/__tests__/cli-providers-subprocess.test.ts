@@ -165,6 +165,16 @@ const WEATHER_TOOL = {
   },
 };
 
+/** get_weather as streamText() takes it. */
+const STREAM_TEXT_TOOLS = {
+  get_weather: { description: WEATHER_TOOL.function.description, parameters: WEATHER_TOOL.function.parameters },
+};
+
+/** The text of each text part of a streamText() stream, in order. */
+function textPartsOf(parts: StreamPart[]): string[] {
+  return parts.flatMap((part) => (part.type === 'text' ? [part.text] : []));
+}
+
 /** The stream-json lines each CLI writes for the cases below. */
 interface StreamFixture {
   /** A reply of "Hello", ending with the CLI's success result. */
@@ -433,6 +443,138 @@ describe('GeminiCLIProvider: the stream-json the current Gemini CLI writes', () 
 
     expect(final.error).toBeUndefined();
     expect(final).toMatchObject({ isFinal: true, choices: [{ finishReason: 'stop', message: { content: 'Hi there' } }] });
+  });
+});
+
+/**
+ * With tools, GeminiCLIProvider asks the model for each tool call as a block
+ * of its reply, <tool_call id=".." name="..">{json}</tool_call>
+ * (injectToolSchemas), and reads the tool calls from the whole reply when the
+ * result event arrives. The Gemini CLI writes the reply as message deltas
+ * wherever the model's chunks end (packages/cli/src/nonInteractiveCli.ts in
+ * google-gemini/gemini-cli at 9b6e0265), so a block can come in pieces.
+ */
+describe('GeminiCLIProvider: tool-call markup in the reply, through streamText()', () => {
+  const at = '2026-10-10T12:00:00.000Z';
+  const opening = [
+    { type: 'init', timestamp: at, session_id: 'g1', model: 'gemini-3.5-flash' },
+    { type: 'message', timestamp: at, role: 'user', content: 'What is the weather in Paris?' },
+  ];
+  /** A piece of the reply, as the CLI writes each one. */
+  const piece = (content: string) => ({ type: 'message', timestamp: at, role: 'assistant', content, delta: true });
+  const result = {
+    type: 'result',
+    timestamp: at,
+    status: 'success',
+    stats: { total_tokens: 15, input_tokens: 12, output_tokens: 3, cached: 0, input: 12, duration_ms: 840, tool_calls: 0 },
+  };
+
+  /**
+   * streamText() on the gemini-cli provider, with get_weather or with no
+   * tools, over a CLI that writes the reply in `pieces` and exits 0: the
+   * stream's parts, its text, and whether each run of the CLI was given a
+   * system prompt, which is where the provider writes the tools.
+   */
+  async function streamTextOver(pieces: string[], { tools }: { tools: boolean }) {
+    const prompted: boolean[] = [];
+    stubCli('gemini', (_args, options) => {
+      prompted.push(options.env?.GEMINI_SYSTEM_MD !== undefined);
+      return cliRun([...opening, ...pieces.map(piece), result], 0);
+    });
+    const stream = streamText({
+      provider: 'gemini-cli',
+      model: 'gemini-3.5-flash',
+      prompt: 'What is the weather in Paris?',
+      ...(tools ? { tools: STREAM_TEXT_TOOLS } : {}),
+    });
+    const parts: StreamPart[] = [];
+    for await (const part of stream.fullStream) parts.push(part);
+    return { prompted, parts, text: await stream.text };
+  }
+
+  it('streams the prose around a tool-call block as text, and the block as the tool call alone', async () => {
+    const { prompted, parts, text } = await streamTextOver(
+      [
+        'Let me look that up. ',
+        '<tool',
+        '_call id="call_1" na',
+        'me="get_weather">{"city": ',
+        '"Paris"}</tool_',
+        'call>',
+        'Back in a moment.',
+      ],
+      { tools: true },
+    );
+
+    expect(prompted).toEqual([true]);
+    expect(textPartsOf(parts)).toEqual(['Let me look that up. ', 'Back in a moment.']);
+    expect(parts.filter((part) => part.type === 'tool-call')).toEqual([
+      { type: 'tool-call', toolName: 'get_weather', args: { city: 'Paris' } },
+    ]);
+    expect(text).toBe('Let me look that up. Back in a moment.');
+  });
+
+  it("streams a '<' in prose that opens no tool-call block as it arrives", async () => {
+    // An HTML tag, a comparison, a tag whose name starts as tool_call does, and tool_call with no attributes.
+    const pieces = ['Wrap it in <b>bold</b>. ', 'If a < b, ', 'the <toolbar> tag stays, ', 'and so does <tool_call> alone.'];
+    const { prompted, parts, text } = await streamTextOver(pieces, { tools: true });
+
+    expect(prompted).toEqual([true]);
+    expect(textPartsOf(parts)).toEqual(pieces);
+    expect(parts.filter((part) => part.type === 'tool-call')).toEqual([]);
+    expect(text).toBe(pieces.join(''));
+  });
+
+  it('passes on, by the end of the reply, prose that quotes an opening tag no closing tag follows', async () => {
+    const pieces = ['A call opens with ', '<tool_call id="call_1" name="get_weather">', ' and its arguments follow.'];
+    const { prompted, parts, text } = await streamTextOver(pieces, { tools: true });
+
+    expect(prompted).toEqual([true]);
+    expect(textPartsOf(parts).join('')).toBe(pieces.join(''));
+    expect(parts.filter((part) => part.type === 'tool-call')).toEqual([]);
+    expect(text).toBe(pieces.join(''));
+  });
+
+  it('streams a reply with no tools as it arrives, markup and all', async () => {
+    const pieces = ['Here is one: ', '<tool_call id="call_1" name="get_weather">', '{"city": "Paris"}</tool_call>'];
+    const { prompted, parts, text } = await streamTextOver(pieces, { tools: false });
+
+    expect(prompted).toEqual([false]);
+    expect(textPartsOf(parts)).toEqual(pieces);
+    expect(parts.filter((part) => part.type === 'tool-call')).toEqual([]);
+    expect(text).toBe(pieces.join(''));
+  });
+
+  it("ends with the abort chunk (error.type 'abort') when the caller aborts while the consumer holds text held back to the reply's end", async () => {
+    // No closing tag follows the opening tag, so the reply's text is held back until the reply ends.
+    const reply = '<tool_call id="call_1" name="get_weather"> opens a call.';
+    let run!: ReturnType<typeof cancellableRun>;
+    stubCli('gemini', (_args, options) => {
+      run = cancellableRun([...opening, piece(reply), result], options.cancelSignal);
+      return run;
+    });
+    const provider = new GeminiCLIProvider();
+    await provider.initialize({});
+    const controller = new AbortController();
+    const chunks: ModelCompletionResponse[] = [];
+    let endedBeforeAbort: boolean | undefined;
+    for await (const chunk of provider.generateCompletionStream('gemini-3.5-flash', HELLO, {
+      tools: [WEATHER_TOOL],
+      abortSignal: controller.signal,
+    })) {
+      chunks.push(chunk);
+      if (chunk.responseTextDelta && !controller.signal.aborted) {
+        endedBeforeAbort = run.state.ended;
+        controller.abort();
+      }
+    }
+    const final = chunks[chunks.length - 1];
+
+    // The CLI had exited 0 and the held text had gone out before the abort: the case under test was reached.
+    expect(endedBeforeAbort).toBe(true);
+    expect(chunks.filter((chunk) => !chunk.isFinal).map((chunk) => chunk.responseTextDelta)).toEqual([reply]);
+    expect(final).toMatchObject({ isFinal: true, error: { type: 'abort', code: 'REQUEST_ABORTED' } });
+    expect(final.choices).toEqual([]);
   });
 });
 
@@ -967,7 +1109,10 @@ describe('ClaudeCodeProvider: a non-streaming call whose result Claude Code flag
  * streamText() and the StreamingReconstructor build a reply's text from the
  * chunks' responseTextDelta alone (the step loop of src/api/streamText.ts,
  * applyChunk in src/core/llm/streaming/StreamingReconstructor.ts), so a text
- * reply reaches them only through a text delta.
+ * reply reaches them only through a text delta. Whether Claude Code writes
+ * text deltas of its own before the reply in such a run (text the model
+ * writes before it, or whitespace) the SDK's types do not say; the cases
+ * below hold the provider to a reply that reaches the consumer once either way.
  */
 describe('ClaudeCodeProvider: a reply Claude Code returns as structured output', () => {
   const cases = [
@@ -1043,45 +1188,90 @@ describe('ClaudeCodeProvider: a reply Claude Code returns as structured output',
   });
 
   const textReply = { response_type: 'text', text: 'It is sunny in Paris.' };
+  /** A text delta as Claude Code writes it with --include-partial-messages. */
+  const textDelta = (text: string) => ({
+    type: 'stream_event',
+    event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+    parent_tool_use_id: null,
+    session_id: 's1',
+  });
 
-  it.each([
-    { name: 'that came only in structured_output', lines: [resultLine(textReply)] },
-    {
-      // The reply's text streamed as deltas, and the same reply in structured_output.
-      name: 'that the CLI also wrote as text deltas, once',
-      lines: [
-        {
-          type: 'stream_event',
-          event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: textReply.text } },
-          parent_tool_use_id: null,
-          session_id: 's1',
-        },
-        resultLine(textReply),
-      ],
-    },
-  ])('streamText() with tools resolves a text reply $name', async ({ lines }) => {
+  /**
+   * streamText() with get_weather on the claude-code-cli provider, over a CLI
+   * that writes `lines` and exits 0: the stream's parts, its text, and the
+   * arguments of each run of the CLI.
+   */
+  async function streamTextWithTool(lines: unknown[]) {
     const runs: string[][] = [];
     stubCli('claude', (args) => {
       runs.push(args);
       return cliRun(lines, 0);
     });
-
     const result = streamText({
       provider: 'claude-code-cli',
       model: 'claude-sonnet-4-6',
       prompt: 'What is the weather in Paris?',
-      tools: {
-        get_weather: { description: WEATHER_TOOL.function.description, parameters: WEATHER_TOOL.function.parameters },
-      },
+      tools: STREAM_TEXT_TOOLS,
     });
     const parts: StreamPart[] = [];
     for await (const part of result.fullStream) parts.push(part);
+    return { runs, parts, text: await result.text };
+  }
+
+  it.each([
+    { name: 'that came only in structured_output', lines: [resultLine(textReply)], texts: [textReply.text] },
+    {
+      // The reply's text streamed as deltas, and the same reply in structured_output.
+      name: 'that the CLI also wrote as text deltas, once',
+      lines: [textDelta(textReply.text), resultLine(textReply)],
+      texts: [textReply.text],
+    },
+    {
+      // No one delta is the reply, and together they hold it.
+      name: 'that the CLI also wrote in two text deltas, once',
+      lines: [textDelta('It is sunny '), textDelta('in Paris.'), resultLine(textReply)],
+      texts: ['It is sunny ', 'in Paris.'],
+    },
+    {
+      name: 'that the CLI also wrote as text deltas after other text, once',
+      lines: [textDelta('Let me check the weather. '), textDelta(textReply.text), resultLine(textReply)],
+      texts: ['Let me check the weather. ', textReply.text],
+    },
+    {
+      // Text deltas that are not the reply, which came only in structured_output.
+      name: 'after a text delta of whitespace',
+      lines: [textDelta('\n\n'), resultLine(textReply)],
+      texts: ['\n\n', textReply.text],
+    },
+    {
+      name: 'after a text delta the model wrote before it',
+      lines: [textDelta('Let me check the weather. '), resultLine(textReply)],
+      texts: ['Let me check the weather. ', textReply.text],
+    },
+  ])('streamText() with tools resolves a text reply $name', async ({ lines, texts }) => {
+    const { runs, parts, text } = await streamTextWithTool(lines);
 
     // streamText() ran the CLI once, with the schema: the case under test was reached.
     expect(runs).toHaveLength(1);
     expect(runs[0]).toContain('--json-schema');
-    expect(parts.flatMap((part) => (part.type === 'text' ? [part.text] : []))).toEqual([textReply.text]);
-    expect(await result.text).toBe(textReply.text);
+    expect(textPartsOf(parts)).toEqual(texts);
+    expect(text).toBe(texts.join(''));
+  });
+
+  it('streamText() with tools passes on a tool call in structured_output after a text delta, with no text of its own', async () => {
+    const { runs, parts, text } = await streamTextWithTool([
+      textDelta('Let me check the weather. '),
+      // The first case's reply: get_weather for Paris.
+      resultLine(cases[0].structured),
+    ]);
+
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toContain('--json-schema');
+    expect(textPartsOf(parts)).toEqual(['Let me check the weather. ']);
+    expect(parts.filter((part) => part.type === 'tool-call')).toEqual([
+      { type: 'tool-call', toolName: 'get_weather', args: { city: 'Paris' } },
+    ]);
+    expect(text).toBe('Let me check the weather. ');
   });
 
   it("ends with the abort chunk (error.type 'abort') when the caller aborts while the consumer holds the reply's text delta", async () => {
