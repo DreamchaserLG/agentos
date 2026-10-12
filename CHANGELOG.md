@@ -1,3 +1,9 @@
+## [0.13.75](https://github.com/framerslab/agentos/compare/v0.13.74...v0.13.75) (2026-10-12)
+
+### feat
+
+* **meetings:** the meeting manager: a run's life from the request to the content-free record (#337) ([3d4b5fc](https://github.com/framerslab/agentos/commit/3d4b5fc509b27a669f57e73e339e72efef883f64))
+
 ## [0.13.74](https://github.com/framerslab/agentos/compare/v0.13.73...v0.13.74) (2026-10-12)
 
 ### fix
