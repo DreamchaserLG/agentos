@@ -1,3 +1,9 @@
+## [0.13.72](https://github.com/framerslab/agentos/compare/v0.13.71...v0.13.72) (2026-10-12)
+
+### fix
+
+* **runtime:** a turn's vision inputs reach the model as image parts, and memory keeps its text (#352) ([2942b1a](https://github.com/framerslab/agentos/commit/2942b1ae2a2ed393b8113b38348f8dafd8907b35))
+
 ## [0.13.71](https://github.com/framerslab/agentos/compare/v0.13.70...v0.13.71) (2026-10-12)
 
 ### fix
