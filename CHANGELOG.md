@@ -1,3 +1,14 @@
+## [0.13.64](https://github.com/framerslab/agentos/compare/v0.13.63...v0.13.64) (2026-10-12)
+
+### feat
+
+* **meetings:** a meeting-participant channel: types, provider interface, stores and signing (#327) ([1fe6ad6](https://github.com/framerslab/agentos/commit/1fe6ad6e7e16347665f600cec30136ff2636da88))
+
+### docs
+
+* add the GMI versus agent() study page (#333) ([0d2aab0](https://github.com/framerslab/agentos/commit/0d2aab0b8b5f11bc332d7d61871e98b076ae355a))
+* correct claims in the files #319 changed (bus retries, HITL, API types) (#331) ([be2e82f](https://github.com/framerslab/agentos/commit/be2e82f97a30afc817299f1222f35c962f3de1a1))
+
 ## [0.13.63](https://github.com/framerslab/agentos/compare/v0.13.62...v0.13.63) (2026-10-12)
 
 ### fix
