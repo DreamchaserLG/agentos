@@ -1,3 +1,14 @@
+## [0.13.80](https://github.com/framerslab/agentos/compare/v0.13.79...v0.13.80) (2026-10-12)
+
+### feat
+
+* **meetings:** Postgres stores for the meeting channel (#368) ([98bf43a](https://github.com/framerslab/agentos/commit/98bf43a624fbd5429798782b55c1b60ae895e665))
+* **voice-pipeline:** the LiveKit transport holds a bounded buffer while paused and reports the gap (#369) ([a893837](https://github.com/framerslab/agentos/commit/a8938375f56a45dc16705feff151ed4d9b2d94bd))
+
+### fix
+
+* **logging:** keep people's words, model output, keys and phone numbers off the log lines (#370) ([e8bf3af](https://github.com/framerslab/agentos/commit/e8bf3af0238e9eca7539a54ec78928bc9a026a68))
+
 ## [0.13.79](https://github.com/framerslab/agentos/compare/v0.13.78...v0.13.79) (2026-10-12)
 
 ### feat
