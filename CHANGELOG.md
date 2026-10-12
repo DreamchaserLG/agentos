@@ -1,3 +1,9 @@
+## [0.13.68](https://github.com/framerslab/agentos/compare/v0.13.67...v0.13.68) (2026-10-12)
+
+### fix
+
+* **gateway:** gmi() forwards the failed hop's error, the walk reads the walkers' tier, and its skips wait for a walk (#346) ([5444af5](https://github.com/framerslab/agentos/commit/5444af5a199784ad482507e0b76fc23bfd96311d))
+
 ## [0.13.67](https://github.com/framerslab/agentos/compare/v0.13.66...v0.13.67) (2026-10-12)
 
 ### fix
