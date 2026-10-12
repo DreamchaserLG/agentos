@@ -1,3 +1,13 @@
+## [0.13.66](https://github.com/framerslab/agentos/compare/v0.13.65...v0.13.66) (2026-10-12)
+
+### fix
+
+* **emergent:** forged tool names are held to the name rule and skill exports write only inside their folder, and export follow-ups from the cold read of #332 (#338) ([ff8e6c5](https://github.com/framerslab/agentos/commit/ff8e6c5249b05ec8d04615c28e17c258255ac40c))
+
+### docs
+
+* name the late calls charged to a later turn on the GMI study page (#339) ([b2957fa](https://github.com/framerslab/agentos/commit/b2957fa0b5f37acc9516096c42c48682eeac250f))
+
 ## [0.13.65](https://github.com/framerslab/agentos/compare/v0.13.64...v0.13.65) (2026-10-12)
 
 ### fix
