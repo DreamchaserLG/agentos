@@ -1,3 +1,9 @@
+## [0.13.77](https://github.com/framerslab/agentos/compare/v0.13.76...v0.13.77) (2026-10-12)
+
+### fix
+
+* **images:** the delete of a Replicate upload is given ten seconds (#359) ([f0d5864](https://github.com/framerslab/agentos/commit/f0d58648b9daae48d826336db657c5f5ece6846d))
+
 ## [0.13.76](https://github.com/framerslab/agentos/compare/v0.13.75...v0.13.76) (2026-10-12)
 
 ### fix
