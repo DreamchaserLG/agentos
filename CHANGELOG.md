@@ -1,3 +1,9 @@
+## [0.13.62](https://github.com/framerslab/agentos/compare/v0.13.61...v0.13.62) (2026-10-12)
+
+### fix
+
+* **images:** style transfer follow-ups from the cold read of #322 (#328) ([dc7fb4c](https://github.com/framerslab/agentos/commit/dc7fb4c19b117e7d7764ab1524b34cd9b9567541))
+
 ## [0.13.61](https://github.com/framerslab/agentos/compare/v0.13.60...v0.13.61) (2026-10-12)
 
 ### fix
