@@ -1,3 +1,9 @@
+## [0.13.76](https://github.com/framerslab/agentos/compare/v0.13.75...v0.13.76) (2026-10-12)
+
+### fix
+
+* **images:** Replicate gets an input image from 1 MB through its Files API, and each image as its own type (#358) ([3839eb3](https://github.com/framerslab/agentos/commit/3839eb3896671fec7a6ffd2355805fcc7b181f06))
+
 ## [0.13.75](https://github.com/framerslab/agentos/compare/v0.13.74...v0.13.75) (2026-10-12)
 
 ### feat
