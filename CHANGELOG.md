@@ -1,3 +1,9 @@
+## [0.13.63](https://github.com/framerslab/agentos/compare/v0.13.62...v0.13.63) (2026-10-12)
+
+### fix
+
+* **images:** edits keep sending GIF as PNG, a typed raw answer is kept, and Fal lists its FLUX.2 generation models (#330) ([d6e4625](https://github.com/framerslab/agentos/commit/d6e4625ac1c5de4809a651213faf14f79a3eb0c8))
+
 ## [0.13.62](https://github.com/framerslab/agentos/compare/v0.13.61...v0.13.62) (2026-10-12)
 
 ### fix
