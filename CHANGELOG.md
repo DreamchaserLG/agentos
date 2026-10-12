@@ -1,3 +1,9 @@
+## [0.13.60](https://github.com/framerslab/agentos/compare/v0.13.59...v0.13.60) (2026-10-12)
+
+### fix
+
+* **images:** an edit sends its image as its own type, and an answer without an image fails (#324) ([3de2f82](https://github.com/framerslab/agentos/commit/3de2f82be34f4fb30dcab66498a1fac245b2f5f2))
+
 ## [0.13.59](https://github.com/framerslab/agentos/compare/v0.13.58...v0.13.59) (2026-10-12)
 
 ### fix
