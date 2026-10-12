@@ -1,3 +1,9 @@
+## [0.13.74](https://github.com/framerslab/agentos/compare/v0.13.73...v0.13.74) (2026-10-12)
+
+### fix
+
+* **runtime:** a multimodal turn's retrieval feedback carries its text, not its image data (#355) ([7cc36c9](https://github.com/framerslab/agentos/commit/7cc36c980309b950b3b20a6da250288bb33ccb7b))
+
 ## [0.13.73](https://github.com/framerslab/agentos/compare/v0.13.72...v0.13.73) (2026-10-12)
 
 ### fix
