@@ -1,3 +1,9 @@
+## [0.13.65](https://github.com/framerslab/agentos/compare/v0.13.64...v0.13.65) (2026-10-12)
+
+### fix
+
+* **memory:** Markdown and Obsidian exports write only inside the export folder, and wiki follow-ups from the cold read of #323 (#332) ([4f64750](https://github.com/framerslab/agentos/commit/4f6475040544f729d834016c4dd5ecd942ae392e))
+
 ## [0.13.64](https://github.com/framerslab/agentos/compare/v0.13.63...v0.13.64) (2026-10-12)
 
 ### feat
