@@ -446,6 +446,41 @@ describe('ReplicateImageProvider', () => {
       expect(JSON.parse(mockFetch.mock.calls[0][1].body).input.image).toMatch(/^data:image\/png;base64,/);
     });
 
+    it('gives a delete ten seconds, and one that never answers leaves the result as it is', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      vi.useFakeTimers();
+      try {
+        mockFetch.mockResolvedValueOnce(fileResponse('src3'));
+        mockFetch.mockResolvedValueOnce(mockPredictionResponse(['https://example.com/upscaled.png']));
+        // A delete that answers only by failing when its signal aborts.
+        mockFetch.mockImplementationOnce(
+          (_url: string, init: RequestInit) =>
+            new Promise((_resolve, reject) => {
+              init.signal!.addEventListener('abort', () => reject(init.signal!.reason));
+            }),
+        );
+
+        let settled = false;
+        const pending = provider.upscaleImage({ modelId: '', image: large(PNG) }).finally(() => {
+          settled = true;
+        });
+        // The upload and the prediction answer at once; the call then waits on the delete.
+        await vi.advanceTimersByTimeAsync(0);
+        expect(requests()[2]).toBe('DELETE https://api.replicate.com/v1/files/src3');
+        await vi.advanceTimersByTimeAsync(9_000);
+        expect(settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        const result = await pending;
+
+        expect(result.images.map((image) => image.url)).toEqual(['https://example.com/upscaled.png']);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('failed (no answer within 10 seconds)'));
+      } finally {
+        vi.useRealTimers();
+        warn.mockRestore();
+      }
+    });
+
     it('deletes the upload when the prediction fails, and a failed delete does not change the error', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
       mockFetch.mockResolvedValueOnce(fileResponse('src2'));
