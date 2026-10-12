@@ -1,3 +1,9 @@
+## [0.13.79](https://github.com/framerslab/agentos/compare/v0.13.78...v0.13.79) (2026-10-12)
+
+### feat
+
+* **voice-pipeline:** a listen-only session and a transcriber that reconnects (#367) ([6a4c7c6](https://github.com/framerslab/agentos/commit/6a4c7c6cc62b714c3f9d03139f72e85216a78ba2))
+
 ## [0.13.78](https://github.com/framerslab/agentos/compare/v0.13.77...v0.13.78) (2026-10-12)
 
 ### fix
