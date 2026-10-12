@@ -1,3 +1,9 @@
+## [0.13.58](https://github.com/framerslab/agentos/compare/v0.13.57...v0.13.58) (2026-10-12)
+
+### fix
+
+* **providers:** structured-output replies always reach stream consumers, and Gemini tool-call markup never streams as text (#315) ([48d82bb](https://github.com/framerslab/agentos/commit/48d82bb3065ebb682b3fc8680b1f4f0631811ae9))
+
 ## [0.13.57](https://github.com/framerslab/agentos/compare/v0.13.56...v0.13.57) (2026-10-12)
 
 ### feat
