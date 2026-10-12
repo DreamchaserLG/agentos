@@ -236,11 +236,23 @@ export class ReplicateImageProvider implements IImageProvider {
           input.input_image = refUrl;
         }
       } else if (modelId.includes('flux-redux')) {
-        input.image = refUrl;
+        // The reference goes as redux_image (see the prompt rule below).
+        if (input.redux_image === undefined) input.redux_image = refUrl;
       } else {
         input.image = refUrl;
         input.image_strength = CONSISTENCY_STRENGTHS[consistencyMode];
       }
+    }
+
+    // FLUX.1 Redux takes its reference as redux_image, which "replaces
+    // prompt": its input has no image, prompt or negative_prompt
+    // (https://replicate.com/black-forest-labs/flux-redux-dev/api/schema).
+    // The prompt this provider adds is dropped however the reference came; a
+    // caller's own providerOptions.input is sent as given.
+    if (modelId.includes('flux-redux')) {
+      const raw = providerOptions?.input ?? {};
+      if (!('prompt' in raw)) delete input.prompt;
+      if (!('negative_prompt' in raw)) delete input.negative_prompt;
     }
 
     // Map control image for ControlNet models
@@ -266,6 +278,18 @@ export class ReplicateImageProvider implements IImageProvider {
         : undefined;
     const waitSeconds = providerOptions?.wait ?? 60;
     let prediction: ReplicatePrediction;
+
+    // A Redux model makes a variation of its reference image and nothing
+    // else. Checked on the input the request sends: the legacy endpoint's
+    // branches put extraBody over the body, so an extraBody.input replaces
+    // the input whole.
+    const extraInput = (providerOptions?.extraBody as { input?: Record<string, unknown> } | undefined)?.input;
+    const sentInput = (hasVersionHash || generateExtraBodyVersion) && extraInput ? extraInput : input;
+    if (modelId.includes('flux-redux') && sentInput.redux_image === undefined) {
+      throw new Error(
+        `Replicate ${modelId} makes a variation of a reference image: pass referenceImageUrl, which it takes as redux_image.`,
+      );
+    }
 
     if (hasVersionHash) {
       // Legacy endpoint: POST /predictions with { version, input }
@@ -673,7 +697,7 @@ export class ReplicateImageProvider implements IImageProvider {
         description: 'Generation and editing from several reference images; transferStyle runs on it',
       })),
       // Variation of a reference image
-      { providerId: this.providerId, modelId: 'black-forest-labs/flux-redux-dev', displayName: 'Flux Redux Dev', description: 'A variation of one reference image, steered by the prompt' },
+      { providerId: this.providerId, modelId: 'black-forest-labs/flux-redux-dev', displayName: 'Flux Redux Dev', description: 'A variation of one reference image (referenceImageUrl); it takes no prompt' },
       // ControlNet
       { providerId: this.providerId, modelId: 'black-forest-labs/flux-canny-dev', displayName: 'Flux Canny', description: 'Edge-guided generation' },
       { providerId: this.providerId, modelId: 'black-forest-labs/flux-depth-dev', displayName: 'Flux Depth', description: 'Depth-guided generation' },
