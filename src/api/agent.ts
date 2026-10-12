@@ -27,6 +27,7 @@ import {
 import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
 import { buildSchemaInstructionText } from './runtime/structuredReply.js';
 import { resolveModelOption } from './model.js';
+import { credentialsGoWith, modelNamesAnotherProvider } from './runtime/credentialOwner.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { ObjectGenerationError } from './generateObject.js';
 import { streamText, type StreamTextResult } from './streamText.js';
@@ -810,6 +811,29 @@ export function agent(opts: AgentOptions): Agent {
     ...(agentBudget ? { budget: agentBudget } : {}),
   };
 
+  /**
+   * One generate() or stream() call's options: the agent's, under the call's.
+   * A call whose model's `provider:` prefix names another provider does not
+   * inherit the agent's. The agent's key and base URL are for the provider
+   * the agent names, so a call that names another provider takes only its
+   * own, and that provider's from the environment otherwise.
+   */
+  const callOptions = (extra: Partial<GenerateTextOptions> | undefined): Partial<GenerateTextOptions> => {
+    let merged = { ...baseOpts, ...extra };
+    if (!extra || (extra.provider === undefined && extra.model === undefined)) return merged;
+    if (
+      extra.provider === undefined &&
+      extra.model !== undefined &&
+      baseOpts.provider !== undefined &&
+      modelNamesAnotherProvider(baseOpts.provider, extra.model)
+    ) {
+      merged = { ...merged, provider: undefined };
+    }
+    if (baseOpts.apiKey === undefined && baseOpts.baseUrl === undefined) return merged;
+    if (credentialsGoWith(baseOpts, merged)) return merged;
+    return { ...merged, apiKey: extra.apiKey, baseUrl: extra.baseUrl };
+  };
+
   const agentInstance: Agent = {
     async generate(
       prompt: MessageContent,
@@ -818,8 +842,7 @@ export function agent(opts: AgentOptions): Agent {
       const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
       const genOpts: Partial<GenerateTextOptions> = applyMemoryProvider(
         {
-          ...baseOpts,
-          ...extra,
+          ...callOptions(extra),
           usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
             source: extra?.usageLedger?.source ?? 'agent.generate',
           }),
@@ -849,8 +872,7 @@ export function agent(opts: AgentOptions): Agent {
       const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
       const streamOpts: Partial<GenerateTextOptions> = applyMemoryProvider(
         {
-          ...baseOpts,
-          ...extra,
+          ...callOptions(extra),
           usageLedger: mergeUsageLedgerOptions(baseOpts.usageLedger, extra?.usageLedger, {
             source: extra?.usageLedger?.source ?? 'agent.stream',
           }),

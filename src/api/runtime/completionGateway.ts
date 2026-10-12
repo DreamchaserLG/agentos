@@ -16,7 +16,9 @@ import type { ITool } from '../../core/tools/ITool.js';
 import type { IModelRouter, ModelRouteParams } from '../../core/llm/routing/IModelRouter.js';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry.js';
 import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
-import { resolveModelOption, resolveProvider, createProviderManager } from '../model.js';
+import { resolveModelOption, resolveProvider, createProviderManager, type ModelOption } from '../model.js';
+import { providerHealthKey } from './providerHealthKey.js';
+import { credentialsGoWith, modelNamesAnotherProvider } from './credentialOwner.js';
 import {
   advanceFallbackWalk,
   buildPolicyAwareFallbackChain,
@@ -56,7 +58,11 @@ export interface CompletionRoute {
    * an explicitly required capability are passed over, and so is the policy chain's entry for the first model.
    */
   fallbackProviders?: FallbackProviderEntry[];
-  /** Credentials for the primary only; fallback hops read the environment, as streamText's walk does. */
+  /**
+   * Credentials for the primary only; fallback hops read the environment, as streamText's walk does.
+   * Set in the gateway defaults beside a provider or model, they are for that provider: a turn that
+   * names another provider does not take them.
+   */
   apiKey?: string;
   baseUrl?: string;
   /** The call's own effort, cache and output budget, from which each fallback hop's overrides are derived. */
@@ -87,6 +93,12 @@ export interface CompletionHop {
   model?: string;
   /** The chain entry behind a fallback hop, with its role in the walk when the policy chain gave it one. */
   entry?: ResolvedFallbackEntry;
+  /**
+   * The primary only: whether the route's own key and base URL are for this
+   * provider. False when a router picked another one, which then runs on its
+   * own credentials.
+   */
+  ownCredentials?: boolean;
 }
 
 /** A hop that is ready to serve: its provider is initialised and its window is known. */
@@ -99,6 +111,13 @@ export interface CompletionResolution {
   /** Same strings as ModelTargetInfo.toolSupport.format. */
   toolFormat: 'openai_functions' | 'anthropic_tools' | 'google_function_calling';
   providerManager: AIModelProviderManager;
+  /**
+   * The id the hop's health is recorded under: for the first hop on a key or
+   * base URL of the route's own that differs from the provider's, the
+   * provider id with a digest of them (see `providerHealthKey`). Absent
+   * means the provider id.
+   */
+  healthId?: string;
   /** Per-hop effort, cache and output budget from `fallbackHopOverrides`; merged over the caller's options. */
   optionOverrides: Partial<ModelCompletionOptions>;
   /** The hop list fixed by the route's first `resolve()`; later calls walk it. */
@@ -246,8 +265,8 @@ function toolNamesOf(tools: CompletionRoute['tools']): string[] {
 }
 
 /** The error a hop with an open circuit fails with, worded as streamText words it. */
-function circuitOpenError(providerId: string): Error {
-  const stats = globalLLMProviderHealth.getStats(providerId);
+function circuitOpenError(providerId: string, healthId: string = providerId): Error {
+  const stats = globalLLMProviderHealth.getStats(healthId);
   return Object.assign(
     new Error(`[503] Provider '${providerId}' circuit open; cooldown ${stats?.cooldownRemainingMs ?? 0}ms`),
     { name: 'LLMProviderCircuitOpenError', httpStatus: 503 },
@@ -255,8 +274,16 @@ function circuitOpenError(providerId: string): Error {
 }
 
 /** Primary selection, the same as streamText's: explicit model and provider, then the router when one is set. */
-async function selectPrimary(route: CompletionRoute): Promise<{ provider: string; model: string }> {
-  let { providerId, modelId } = resolveModelOption({ provider: route.providerId, model: route.modelId }, 'text');
+async function selectPrimary(route: CompletionRoute): Promise<{ provider: string; model: string; ownCredentials: boolean }> {
+  // With the route's own key or base URL, so a model prefix that names
+  // another provider than the route's is refused rather than handed the key.
+  let { providerId, modelId } = resolveModelOption(
+    { provider: route.providerId, model: route.modelId, apiKey: route.apiKey, baseUrl: route.baseUrl } as ModelOption,
+    'text',
+  );
+  // The provider the route's own credentials are for: a router that picks
+  // another serves the primary on that provider's own credentials.
+  const credentialProviderId = providerId;
   if (route.router) {
     try {
       const toolNames = toolNamesOf(route.tools);
@@ -283,7 +310,7 @@ async function selectPrimary(route: CompletionRoute): Promise<{ provider: string
       console.warn('[agentos] Model router error, falling back to standard resolution:', routerErr);
     }
   }
-  return { provider: providerId, model: modelId };
+  return { provider: providerId, model: modelId, ownCredentials: providerId === credentialProviderId };
 }
 
 type InBandError = NonNullable<ModelCompletionResponse['error']>;
@@ -596,7 +623,28 @@ function liftSchemaToolCall(chunk: ModelCompletionResponse, toolName: string): M
 
 export function createCompletionGateway(defaults: Partial<CompletionRoute> = {}): CompletionGateway {
   async function resolve(input: CompletionRoute, after?: CompletionResolution, failure?: unknown): Promise<CompletionResolution | null> {
-    const route: CompletionRoute = { ...defaults, ...definedOnly(input as unknown as Record<string, unknown>) } as CompletionRoute;
+    const own = definedOnly(input as unknown as Record<string, unknown>) as Partial<CompletionRoute>;
+    const route: CompletionRoute = { ...defaults, ...own } as CompletionRoute;
+    // A turn whose model's `provider:` prefix names another provider than the
+    // defaults' does not inherit the defaults' provider.
+    if (
+      own.providerId === undefined &&
+      own.modelId !== undefined &&
+      defaults.providerId !== undefined &&
+      modelNamesAnotherProvider(defaults.providerId, own.modelId)
+    ) {
+      route.providerId = undefined;
+    }
+    // The defaults' key and base URL are for the provider the defaults name:
+    // a turn that names another provider takes only its own, and the
+    // primary then reads that provider's from the environment.
+    if (
+      (defaults.apiKey !== undefined || defaults.baseUrl !== undefined) &&
+      !credentialsGoWith({ provider: defaults.providerId, model: defaults.modelId }, { provider: route.providerId, model: route.modelId })
+    ) {
+      route.apiKey = own.apiKey;
+      route.baseUrl = own.baseUrl;
+    }
     let chain: ReadonlyArray<CompletionHop>;
     let walk: FallbackWalkState;
     // The resolution's passed-over entries, reported when a walk starts.
@@ -623,7 +671,10 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         excludedModelIds: route.routerParams?.excludedModelIds,
         onSkip: (entry, reason) => pendingSkips.push({ provider: entry.provider, model: entry.model, reason }),
       });
-      chain = [{ provider: primary.provider, model: primary.model }, ...resolved.map((entry) => ({ provider: entry.provider, model: entry.model, entry }))];
+      chain = [
+        { provider: primary.provider, model: primary.model, ownCredentials: primary.ownCredentials },
+        ...resolved.map((entry) => ({ provider: entry.provider, model: entry.model, entry })),
+      ];
       walk = INITIAL_FALLBACK_WALK;
     }
     let lastError: Error | undefined;
@@ -640,15 +691,26 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         walk = gate.state;
       }
       // Set once credentials resolve: the provider that serves the hop (resolveProvider
-      // may serve anthropic through openrouter), whose circuit and health are the hop's.
+      // may serve anthropic through openrouter), and the id its circuit and health
+      // are kept under (the route's own key and base URL have one of their own).
       let servingProviderId: string | undefined;
+      let healthId: string | undefined;
       try {
         const parsed = hop === 0 && h.model ? { providerId: h.provider, modelId: h.model } : resolveModelOption({ provider: h.provider, model: h.model }, 'text');
-        const resolved = hop === 0
+        // The route's own credentials go to the primary only when they are for
+        // its provider (a router may have picked another).
+        const routeCredentials = hop === 0 && h.ownCredentials !== false;
+        const resolved = routeCredentials
           ? resolveProvider(parsed.providerId, parsed.modelId, { apiKey: route.apiKey, baseUrl: route.baseUrl })
           : resolveProvider(parsed.providerId, parsed.modelId);
         servingProviderId = resolved.providerId;
-        if (globalLLMProviderHealth.isOpen(resolved.providerId)) throw circuitOpenError(resolved.providerId);
+        const ownCredentials = routeCredentials && (route.apiKey !== undefined || route.baseUrl !== undefined);
+        const hopHealthId = providerHealthKey(
+          resolved,
+          ownCredentials ? () => resolveProvider(parsed.providerId, parsed.modelId) : undefined,
+        );
+        healthId = hopHealthId;
+        if (globalLLMProviderHealth.isOpen(hopHealthId)) throw circuitOpenError(resolved.providerId, hopHealthId);
         const providerManager = await createProviderManager(resolved);
         const info = await providerManager.getModelInfo(resolved.modelId, resolved.providerId);
         const overrides = h.entry ? fallbackHopOverrides(route.callOptions ?? {}, h.entry) : undefined;
@@ -660,6 +722,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           capabilities: [...(info?.capabilities ?? [])],
           toolFormat: toolFormatFor(resolved.providerId),
           providerManager,
+          healthId: hopHealthId,
           optionOverrides: overrides
             ? (definedOnly({ maxTokens: overrides.maxTokens, effort: overrides.effort, cache: overrides.cache }) as Partial<ModelCompletionOptions>)
             : {},
@@ -679,8 +742,8 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         // As in streamText: a configuration error (no credentials, unknown model)
         // says nothing about the provider's health, and an open circuit is the
         // registry's own verdict; neither is recorded.
-        if (servingProviderId && lastError.name !== 'LLMProviderCircuitOpenError') {
-          globalLLMProviderHealth.recordFailure(servingProviderId, lastError);
+        if (healthId && lastError.name !== 'LLMProviderCircuitOpenError') {
+          globalLLMProviderHealth.recordFailure(healthId, lastError);
         }
         route.onHopFailure?.({ providerId: servingProviderId ?? h.provider, hop, error: lastError });
         // The primary's configuration error (no credentials, unknown provider) is the caller's to see.
@@ -754,7 +817,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
         const provider = resolution.providerManager.getProvider(resolution.providerId);
         if (!provider) {
           const error = Object.assign(new Error(`Provider '${resolution.providerId}' is not available.`), { name: 'ProviderInitializationError' });
-          globalLLMProviderHealth.recordFailure(resolution.providerId, error);
+          globalLLMProviderHealth.recordFailure(resolution.healthId ?? resolution.providerId, error);
           finish(failed(error, undefined));
           return;
         }
@@ -768,7 +831,7 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
             // hop and says nothing about the provider's health (as in streamText).
             const aborted = chunk.error.type === 'abort';
             const error = errorFromChunk(chunk.error);
-            if (!aborted) globalLLMProviderHealth.recordFailure(resolution.providerId, error);
+            if (!aborted) globalLLMProviderHealth.recordFailure(resolution.healthId ?? resolution.providerId, error);
             if (!delivered) {
               const usage = billedUsage(buffer, error, chunk.usage);
               finish(aborted ? failed(error, usage, false) : failed(error, usage));
@@ -799,11 +862,11 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
           yield* buffer.splice(0);
         }
         completed = true;
-        globalLLMProviderHealth.recordSuccess(resolution.providerId);
+        globalLLMProviderHealth.recordSuccess(resolution.healthId ?? resolution.providerId);
         finish({ kind: 'delivered' });
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        globalLLMProviderHealth.recordFailure(resolution.providerId, error);
+        globalLLMProviderHealth.recordFailure(resolution.healthId ?? resolution.providerId, error);
         if (!delivered) {
           finish(failed(error, billedUsage(buffer, error)));
           return;

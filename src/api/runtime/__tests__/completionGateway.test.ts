@@ -141,12 +141,56 @@ describe('CompletionGateway.resolve', () => {
     expect(r?.chain.map((h) => h.provider)).toEqual(['openai', 'anthropic']);
   });
 
+  it("keeps the defaults' credentials with the provider the defaults name; a turn that names another takes only its own", async () => {
+    const gateway = createCompletionGateway({ providerId: 'openai', modelId: 'gpt-4o', apiKey: 'sk-openai-default', baseUrl: 'http://openai.local/v1', fallbackProviders: [] });
+
+    await gateway.resolve({ providerId: 'anthropic', modelId: 'claude-x', messages: [] });
+    await gateway.resolve({ providerId: 'openai', modelId: 'gpt-4.1', messages: [] });
+    await gateway.resolve({ providerId: 'anthropic', modelId: 'claude-x', messages: [], apiKey: 'sk-ant-turn' });
+
+    expect(created).toEqual([
+      { providerId: 'anthropic', modelId: 'claude-x', apiKey: 'env-key-anthropic', baseUrl: undefined },
+      { providerId: 'openai', modelId: 'gpt-4.1', apiKey: 'sk-openai-default', baseUrl: 'http://openai.local/v1' },
+      { providerId: 'anthropic', modelId: 'claude-x', apiKey: 'sk-ant-turn', baseUrl: undefined },
+    ]);
+  });
+
+  it("runs a turn whose model's prefix names another provider than the defaults' there, on its own key or that provider's", async () => {
+    const gateway = createCompletionGateway({ providerId: 'openai', apiKey: 'sk-openai-default', fallbackProviders: [] });
+
+    await gateway.resolve({ modelId: 'anthropic:claude-x', messages: [], apiKey: 'sk-ant-turn' });
+    await gateway.resolve({ modelId: 'anthropic:claude-x', messages: [] });
+
+    expect(created).toEqual([
+      { providerId: 'anthropic', modelId: 'claude-x', apiKey: 'sk-ant-turn', baseUrl: undefined },
+      { providerId: 'anthropic', modelId: 'claude-x', apiKey: 'env-key-anthropic', baseUrl: undefined },
+    ]);
+  });
+
   it('lets a router pick the primary, with the task hint from the last user message', async () => {
     const selectModel = vi.fn(async (_params: unknown) => ({ modelId: 'claude-routed', modelInfo: { providerId: 'anthropic' } }));
     const gateway = createCompletionGateway({ router: { routerId: 'test', initialize: async () => undefined, selectModel } as never });
     const r = await gateway.resolve({ providerId: 'openai', modelId: 'gpt-4o', messages: [{ role: 'user', content: 'summarise the attached report' }], fallbackProviders: [] });
     expect(r).toMatchObject({ providerId: 'anthropic', modelId: 'claude-routed', hop: 0 });
     expect(selectModel.mock.calls[0][0]).toMatchObject({ taskHint: 'summarise the attached report', optimizationPreference: 'balanced' });
+  });
+
+  it("serves a primary a router moved to another provider on that provider's own key, not the route's", async () => {
+    const selectModel = vi.fn(async () => ({ modelId: 'claude-routed', modelInfo: { providerId: 'anthropic' } }));
+    const gateway = createCompletionGateway({ router: { routerId: 'test', initialize: async () => undefined, selectModel } as never });
+
+    await gateway.resolve({ providerId: 'openai', modelId: 'gpt-4o', messages: [], apiKey: 'sk-openai-tenant', fallbackProviders: [] });
+
+    expect(created).toEqual([{ providerId: 'anthropic', modelId: 'claude-routed', apiKey: 'env-key-anthropic', baseUrl: undefined }]);
+  });
+
+  it('refuses route credentials whose model prefix names another provider than the route', async () => {
+    const gateway = createCompletionGateway();
+
+    await expect(
+      gateway.resolve({ providerId: 'openai', modelId: 'anthropic:claude-x', messages: [], apiKey: 'sk-openai-tenant', fallbackProviders: [] }),
+    ).rejects.toThrow("names provider 'anthropic', not 'openai'");
+    expect(created).toEqual([]);
   });
 });
 
