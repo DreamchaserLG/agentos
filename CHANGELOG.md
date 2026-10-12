@@ -1,3 +1,9 @@
+## [0.13.61](https://github.com/framerslab/agentos/compare/v0.13.60...v0.13.61) (2026-10-12)
+
+### fix
+
+* **memory:** wiki page ids stay inside the memory folder (#323) ([45e9d5a](https://github.com/framerslab/agentos/commit/45e9d5a1dbe2193e211db871b49fc8ed01b6dd83))
+
 ## [0.13.60](https://github.com/framerslab/agentos/compare/v0.13.59...v0.13.60) (2026-10-12)
 
 ### fix
