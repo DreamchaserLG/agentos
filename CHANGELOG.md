@@ -1,3 +1,10 @@
+## [0.13.78](https://github.com/framerslab/agentos/compare/v0.13.77...v0.13.78) (2026-10-12)
+
+### fix
+
+* **orchestration:** the graph saves its checkpoint before yielding an interrupt, and the communication bus retry cap holds (#354) ([40f7960](https://github.com/framerslab/agentos/commit/40f79603776ee93eaaf54d78a134dba7b0ab93ec))
+* **voice-pipeline:** the orchestrator re-emits turn_complete, so waitForUserTurn resolves (#356) ([a7a00d9](https://github.com/framerslab/agentos/commit/a7a00d94e952ad94aac2f22a481d4a6f9adf9be8))
+
 ## [0.13.77](https://github.com/framerslab/agentos/compare/v0.13.76...v0.13.77) (2026-10-12)
 
 ### fix
