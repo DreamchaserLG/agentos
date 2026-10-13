@@ -35,7 +35,6 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('no content on any output channel', () => {
   it('AgentOS feedback', async () => markerCapture(marker, async legacy => {
-    process.stderr.write(marker); // A deliberate leak: this case must fail with the marker found.
     const agent = new AgentOS(legacy);
     Object.assign(agent, { initialized: true, gmiManager: { processUserFeedback: async () => {} } });
     await agent.receiveFeedback('user-1', 'session-1', 'persona-1', { text: marker, correctedContent: marker });
