@@ -1,3 +1,9 @@
+## [0.13.89](https://github.com/framerslab/agentos/compare/v0.13.88...v0.13.89) (2026-10-13)
+
+### fix
+
+* **meetings:** follow-ups to #376: the provenance helpers' prefix bound, NoCapacityError's TSDoc and LifecycleSerial's ordering tests (#389) ([bcf37db](https://github.com/framerslab/agentos/commit/bcf37db3836a0a09cd3e03f5b6e35124fb2bb20f))
+
 ## [0.13.88](https://github.com/framerslab/agentos/compare/v0.13.87...v0.13.88) (2026-10-13)
 
 ### fix
