@@ -1,3 +1,9 @@
+## [0.13.96](https://github.com/framerslab/agentos/compare/v0.13.95...v0.13.96) (2026-10-13)
+
+### fix
+
+* **skills:** read skill and soul files without following links (#404) ([fdd5515](https://github.com/framerslab/agentos/commit/fdd5515edaa1a2e296c2e11bfc9cce3b0a3434b0))
+
 ## [0.13.95](https://github.com/framerslab/agentos/compare/v0.13.94...v0.13.95) (2026-10-13)
 
 ### fix
