@@ -54,4 +54,29 @@ describe('agency() seats served by GMIs', () => {
 
     expect(() => agency({ provider: 'openai', model: 'stub-model', apiKey: k, runtime: 'fast' as 'gmi', agents: { a: { instructions: 'x' } } })).toThrow(AgencyConfigError);
   });
+
+  it("a pre-built seat's description reaches the manager and its dependsOn orders the graph", async () => {
+    // The manager of a hierarchical agency reads a pre-built seat's description into its roster.
+    const k1 = key();
+    const s1 = script('openai', k1, { replies: [reply.text('Nothing to delegate.')], whole: true });
+    const checker = Object.assign(agent({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: k1, instructions: 'Check.' }), {
+      description: 'Checks facts against sources.',
+    });
+    const managed = agency({ provider: 'openai', model: 'stub-model', apiKey: k1, strategy: 'hierarchical', agents: { checker } });
+    await managed.generate('Check the claim.');
+    expect(systemText(s1.seen[0])).toContain('- checker: Checks facts against sources.');
+
+    // A pre-built seat's dependsOn selects the graph strategy and orders the run: `b` waits for `a`, though the
+    // roster lists `b` first, and receives `a`'s output as a dependency.
+    const k2 = key();
+    const s2 = script('openai', k2, { replies: [reply.text('Fact A.'), reply.text('Report B.')] });
+    const seat = (instructions: string) => agent({ runtime: 'gmi', provider: 'openai', model: 'stub-model', apiKey: k2, instructions });
+    const b = Object.assign(seat('Report.'), { dependsOn: ['a'] });
+    const a = seat('Find a fact.');
+    const graphTeam = agency({ provider: 'openai', model: 'stub-model', apiKey: k2, agents: { b, a } });
+    const result = (await graphTeam.generate('Write the report.')) as { agentCalls: Array<{ agent: string; input: string }> };
+    expect(result.agentCalls.map((call) => call.agent)).toEqual(['a', 'b']);
+    expect(lastUserText(s2.seen[1])).toContain('Outputs from dependencies:');
+    expect(lastUserText(s2.seen[1])).toContain('[a]:\nFact A.');
+  });
 });
