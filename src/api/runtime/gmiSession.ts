@@ -343,8 +343,9 @@ export async function* runGmiTurn(
       structured: turn.responseSchema !== undefined,
       budget: turn.budget,
       // The bill a provider reports for a call this turn stopped (close() during
-      // the call) arrives after the turn has ended: it is metered and counted
-      // as a failed attempt's, as a billed failure during the turn is.
+      // the call) arrives after the turn has ended: it is metered, counted and
+      // charged to the turn's budget as a failed attempt's, as a billed failure
+      // during the turn is.
       onLateUsage: (report) => {
         void meterCall(deps.ledger, surface, {
           providerId: report.providerId,
@@ -357,6 +358,7 @@ export async function* runGmiTurn(
         const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
         addModelUsage(usage, report.usage);
         deps.onUsage(usage);
+        chargeBudget(turn.budget, report.providerId, report.modelId, report.usage, 'gmi.step');
       },
     });
     writer = deps.history?.beginTurn(turn.blockLabel, epochAtStart);
@@ -424,6 +426,7 @@ export async function* runGmiTurn(
                 startedAt: callStartedAt,
               }),
             );
+            chargeBudget(turn.budget, meta.providerId, meta.modelId, chunk.content, 'gmi.step');
             callStartedAt = Date.now();
           }
           break;

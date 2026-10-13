@@ -783,9 +783,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
           const persisted = await recordedUsage(ledger, sessionId);
           return ledger?.enabled ? persisted : mergeAggregates(tally, persisted);
         },
-        // A GMI agent takes no budget (it throws at construction), so an
-        // outside cost has nothing to be charged to.
-        recordExternalCost: () => undefined,
+        // An outside cost is charged to the agent's budget, as agent()'s session charges it; without one it does nothing.
+        recordExternalCost: (costUSD: number, meta?: { kind?: string }) => agentBudget?.recordExternal(costUSD, meta?.kind ?? 'external'),
         clear: () => {
           history?.reseed([]);
           syncGmiHistory();
