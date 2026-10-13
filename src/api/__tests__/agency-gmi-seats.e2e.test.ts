@@ -139,4 +139,46 @@ describe('agency() seats served by GMIs', () => {
     expect((await member.usage(seat.seatId)).totalTokens).toBe(0);
     expect((await member.usage()).totalTokens).toBeGreaterThan(0);
   });
+
+  it('a persistent member in a seat recalls nothing of its caller and files nothing under the caller', async () => {
+    const k = key();
+    const emb = key();
+    const s = script('openai', k, { replies: [reply.text('Noted.'), reply.text('I cannot say.'), reply.text('I recall the locker.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const member = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [], instructions: 'Help.',
+      cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false } as never,
+      tools: { memory_add: { description: 'Add a memory.', parameters: { type: 'object', properties: {} }, execute: async () => 'ok' } },
+    });
+
+    // The caller tells the member something in its own session.
+    await member.session('mine', { userId: 'u1' }).send('My locker code is CANARY-ONE-7731.');
+    // A seat that runs as the caller (a launch's seat names the parent turn's user).
+    const seat = buildSessionSeat(member, { form: 'persistent', role: 'helper', userId: 'u1' });
+    await seat.generate('Remember: the vault word is CANARY-TWO-4410. What is my locker code?');
+    expect(JSON.stringify(s.seen[1].messages)).not.toContain('CANARY-ONE-7731');
+    // The caller's next session recalls its own words (the precondition) and nothing the seat was told.
+    await member.session('mine-2', { userId: 'u1' }).send('Which locker code and vault word do you remember?');
+    const recalled = JSON.stringify(s.seen[2].messages);
+    expect(recalled).toContain('CANARY-ONE-7731');
+    expect(recalled).not.toContain('CANARY-TWO-4410');
+
+    // A memory tool never runs in a seat.
+    expect(() => sessionSeat(member, { tools: ['memory_add'] })).toThrow(TypeError);
+    expect(() => sessionSeat(member, { tools: ['memory_add'] })).toThrow("'memory_add'");
+
+    // A member with a memory provider: no getContext and no observe on a seat turn.
+    const k2 = key();
+    script('openai', k2, { replies: [reply.text('Seat answer.'), reply.text('Own answer.')] });
+    const getContext = vi.fn(async (_text: string) => ({ contextText: 'FROM PROVIDER' }));
+    const observe = vi.fn(async (_role: string, _text: string) => undefined);
+    const withProvider = gmi({ provider: 'openai', model: 'stub-model', apiKey: k2, instructions: 'Help.', memoryProvider: { getContext, observe } });
+    await buildSessionSeat(withProvider, { form: 'persistent', role: 'helper', userId: 'u1' }).generate('The word is CANARY-THREE-9020.');
+    await withProvider.session('own', { userId: 'u1' }).send('Own words.');
+    // The provider is wired: the member's own turn reaches it.
+    await vi.waitFor(() => expect(observe).toHaveBeenCalledWith('user', 'Own words.'));
+    expect(getContext.mock.calls.some(([text]) => text.includes('CANARY-THREE'))).toBe(false);
+    expect(observe.mock.calls.some(([, text]) => text.includes('CANARY-THREE'))).toBe(false);
+  });
 });
