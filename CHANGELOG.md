@@ -1,3 +1,9 @@
+## [0.13.112](https://github.com/framerslab/agentos/compare/v0.13.111...v0.13.112) (2026-10-13)
+
+### fix
+
+* **telephony:** keep carrier transports compatible with the voice pipeline and keep local call changes (#437) ([4837b05](https://github.com/framerslab/agentos/commit/4837b056461dd5e7941c599a5f1181ea127e3ca8))
+
 ## [0.13.111](https://github.com/framerslab/agentos/compare/v0.13.110...v0.13.111) (2026-10-13)
 
 ### fix
