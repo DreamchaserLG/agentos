@@ -49,12 +49,31 @@ export function getDeferredCapabilities(
   });
 }
 
+/**
+ * The fields set on an `agent()` config that the agent without `runtime: 'gmi'`
+ * accepts and does not apply: {@link getDeferredCapabilities} for the `agent`
+ * surface.
+ */
 export function getDeferredLightweightAgentCapabilities(
   config: Partial<BaseAgentConfig>,
 ): CapabilityKey[] {
   return getDeferredCapabilities(config, 'agent');
 }
 
+/**
+ * The fields no surface enforces (see the capability contract), so the
+ * warning names neither the full runtime nor `agency()` for them.
+ */
+const ENFORCED_ON_NO_SURFACE: ReadonlySet<CapabilityKey> = new Set<CapabilityKey>(['security', 'permissions']);
+
+/**
+ * Logs one warning through `warn` when `config` sets a field that
+ * {@link getDeferredLightweightAgentCapabilities} returns, and returns those
+ * fields. The message has one part per group: the fields it points to the
+ * full runtime or `agency()`, the memory settings other than the working
+ * callback, and `security` and `permissions`, which no surface enforces.
+ * `agent()` without `runtime: 'gmi'` calls it once at construction.
+ */
 export function warnOnDeferredLightweightAgentCapabilities(
   config: Partial<BaseAgentConfig>,
   warn: (message: string) => void = console.warn,
@@ -65,7 +84,8 @@ export function warnOnDeferredLightweightAgentCapabilities(
   }
 
   const parts: string[] = [];
-  const others = deferredCapabilities.filter((key) => key !== 'memory');
+  const enforcedNowhere = deferredCapabilities.filter((key) => ENFORCED_ON_NO_SURFACE.has(key));
+  const others = deferredCapabilities.filter((key) => key !== 'memory' && !ENFORCED_ON_NO_SURFACE.has(key));
   if (others.length > 0) {
     parts.push(
       `agent() accepted config that requires the full AgentOS runtime or agency(): ${others.join(', ')}. `
@@ -75,6 +95,12 @@ export function warnOnDeferredLightweightAgentCapabilities(
   // The default runtime consumes only the working callback, filtered above.
   if (deferredCapabilities.includes('memory')) {
     parts.push("agent() applies memory settings other than the working callback only with runtime: 'gmi'; these settings are not applied here.");
+  }
+  if (enforcedNowhere.length > 0) {
+    parts.push(
+      `agent() accepted ${enforcedNowhere.join(' and ')}, which no AgentOS surface enforces; `
+        + 'gate tools with hitl.approvals.beforeTool on agency() or an onBeforeToolExecution hook.',
+    );
   }
   warn(`[AgentOS] ${parts.join(' ')}`);
 

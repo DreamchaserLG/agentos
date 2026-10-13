@@ -117,9 +117,11 @@ export interface AgentMemoryProvider {
  * Configuration options for the {@link agent} factory function.
  *
  * Extends `BaseAgentConfig` with backward-compatible convenience fields.
- * All `BaseAgentConfig` fields (rag, discovery, permissions, emergent, voice,
- * etc.) are accepted and stored in config but are not actively wired in the
- * lightweight agent — they will be consumed by `agency()` and the full runtime.
+ * All `BaseAgentConfig` fields are accepted. Without `runtime: 'gmi'`, the
+ * lightweight agent does not apply the ones the `agent` column of the
+ * capability contract defers (rag, discovery, guardrails, security,
+ * permissions, emergent, voice, etc.), and one warning at construction names
+ * those that are set. No surface applies `security` or `permissions`.
  */
 export interface AgentOptions extends BaseAgentConfig {
   /**
@@ -782,9 +784,11 @@ async function generateWithValidation(
  * these options, and the construction checks and diagnostics of that path.
  *
  * @param opts - Agent configuration including model, instructions, and optional tools.
- *   All `BaseAgentConfig` fields are accepted; advanced fields (rag, discovery,
- *   permissions, emergent, voice, guardrails, etc.) are stored but not actively
- *   wired in the lightweight layer — they are consumed by `agency()` and the full runtime.
+ *   All `BaseAgentConfig` fields are accepted. Without `runtime: 'gmi'`, the fields
+ *   the `agent` column of the capability contract defers (rag, discovery,
+ *   guardrails, security, permissions, emergent, voice, etc.) are not applied, and
+ *   one warning at construction names those that are set. No surface applies
+ *   `security` or `permissions`.
  * @returns An {@link Agent} instance with `generate`, `stream`, `session`, and `close` methods.
  * @throws {Error} With `runtime: 'gmi'`, at construction, naming an option the GMI path
  *   cannot honour (see {@link gmi}).
