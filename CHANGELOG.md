@@ -1,3 +1,9 @@
+## [0.13.95](https://github.com/framerslab/agentos/compare/v0.13.94...v0.13.95) (2026-10-13)
+
+### fix
+
+* **voice-pipeline:** report transport sends that reject instead of leaving them unhandled (#399) ([a7f3175](https://github.com/framerslab/agentos/commit/a7f317509a49f326d1a8a2431434eb70157ec7cc))
+
 ## [0.13.94](https://github.com/framerslab/agentos/compare/v0.13.93...v0.13.94) (2026-10-13)
 
 ### fix
