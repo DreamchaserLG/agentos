@@ -38,6 +38,7 @@ import { createCompletionGateway, type CompletionAttempt, type CompletionGateway
 import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
 import { asSpendBudget, assertCallWithinBudget, promptCharsOf, type SpendBudget } from './runtime/spendBudget.js';
 import { adaptTools } from './runtime/toolAdapter.js';
+import { withMembers } from './runtime/withMembers.js';
 import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
 import { personaFromAgentOptions } from './runtime/gmiPersona.js';
 import { modelNamesAnotherProvider } from './runtime/credentialOwner.js';
@@ -118,17 +119,6 @@ function withLeadingSystemText(messages: ChatMessage[], text: string): ChatMessa
   if (typeof content === 'string') return [{ ...first, content: content ? `${text}\n\n${content}` : text }, ...messages.slice(1)];
   if (Array.isArray(content)) return [{ ...first, content: [{ type: 'text', text }, ...content] }, ...messages.slice(1)];
   return [{ ...first, content: text }, ...messages.slice(1)];
-}
-
-/** `target` with some members replaced; every other method runs on `target` itself. */
-function withMembers<T extends object>(target: T, members: Partial<Record<keyof T, unknown>>): T {
-  return new Proxy(target, {
-    get(t, prop) {
-      if (Object.prototype.hasOwnProperty.call(members, prop)) return (members as Record<PropertyKey, unknown>)[prop];
-      const value = Reflect.get(t, prop, t);
-      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(t) : value;
-    },
-  });
 }
 
 /**
