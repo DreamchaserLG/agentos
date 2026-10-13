@@ -84,8 +84,14 @@ describe('the logging hand-over', () => {
     expect(parseLogLevel({ AGENTOS_LOG_LEVEL: 'silent' }).level).toBe('silent');
     vi.stubEnv('AGENTOS_LOG_LEVEL', 'sk-marker');
     const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    // pino writes to process.stdout itself once its write has been replaced, so the spy receives the root's lines.
+    const warnings = () => out.mock.calls.filter(([chunk]) => String(chunk).includes('"event":"logging.level_unknown"'));
     createLogger('one'); createLogger('two');
     expect(getLoggingState().levelWarned).toBe(true);
+    expect(warnings()).toHaveLength(1);
+    // A root built again after a reset does not repeat the line: it is written once per process.
+    resetLoggerFactory(); createLogger('three');
+    expect(warnings()).toHaveLength(1);
     expect(JSON.stringify(out.mock.calls)).not.toContain('sk-marker');
   });
 });
