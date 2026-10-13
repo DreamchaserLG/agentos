@@ -1,3 +1,14 @@
+## [0.13.83](https://github.com/framerslab/agentos/compare/v0.13.82...v0.13.83) (2026-10-13)
+
+### feat
+
+* **api:** verify session citations, validate generate output and add working-memory blocks (#378) ([2d61bd6](https://github.com/framerslab/agentos/commit/2d61bd6e3618afba9a125758bbace32cd2bf4c8d))
+
+### docs
+
+* correct the GMI paper's data statement and its fallback memory endpoint (#374) ([4bd20b1](https://github.com/framerslab/agentos/commit/4bd20b11adc68c8e1fac6f34023a700aedfd60a0))
+* correct the GMI study's user-data and report lines (#372) ([ed49ab2](https://github.com/framerslab/agentos/commit/ed49ab2e97637be56a87888b6274ac9e7ea5cd74))
+
 ## [0.13.82](https://github.com/framerslab/agentos/compare/v0.13.81...v0.13.82) (2026-10-12)
 
 ### feat
