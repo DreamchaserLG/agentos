@@ -63,12 +63,13 @@ export type GmiHandle = Agent;
 /** Options with no GMI-path implementation yet; set, they throw at construction. */
 const UNSUPPORTED_ON_GMI = ['voice', 'avatar', 'channels'] as const;
 /**
- * Per-call overrides generate() and stream() accept on the GMI path (spec D10),
- * and the tool-approval gate `agency()` passes with every call to a member.
+ * Per-call overrides generate() and stream() accept on the GMI path (spec D10): the completion options, the route,
+ * the step limit, the ledger, the call's stop and budget, and the tool-approval gate `agency()` passes with every
+ * call to a member.
  */
-const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate']);
-/** Per-call overrides that pick the route, the step limit, the ledger or the approval gate rather than a completion option. */
-const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate']);
+const ALLOWED_CALL_OVERRIDES = new Set(['temperature', 'maxTokens', 'topP', 'responseFormat', 'model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget']);
+/** Per-call overrides that pick the route, the step limit, the ledger, the stop, the budget or the gate rather than a completion option. */
+const ROUTE_OVERRIDES = new Set(['model', 'provider', 'maxSteps', 'usageLedger', '__approvalGate', 'abortSignal', 'budget']);
 /** `agent()`'s step limit. */
 const DEFAULT_MAX_STEPS = 5;
 
@@ -630,10 +631,26 @@ export function gmi(opts: GmiOptions): GmiHandle {
     };
   }
 
+  /** What a generate() or stream() call hands its turn: its stop, and its budget (a new one from settings) or the agent's. */
+  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'budget'> => {
+    const budget = asSpendBudget(extra?.budget) ?? agentBudget;
+    return { ...(extra?.abortSignal ? { abortSignal: extra.abortSignal } : {}), ...(budget ? { budget } : {}) };
+  };
+
   const handle: Agent = {
     async generate(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): Promise<GenerateTextResult> {
       const options = overridesOf(extra);
-      const result = await sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options });
+      const callerSignal = extra?.abortSignal;
+      // A call whose signal has already aborted starts no turn, as a session's send does.
+      callerSignal?.throwIfAborted();
+      let result: GenerateTextResult;
+      try {
+        result = await sendGmiTurn(oneShotDeps('agent.generate', extra), prompt, { options, ...callTurn(extra) });
+      } catch (error) {
+        // Once the caller's signal has aborted, the call rejects with its reason, as a session's send does.
+        if (callerSignal?.aborted) throw callerSignal.reason;
+        throw error;
+      }
       // As agent().generate() does: the answer checked against the sources retrieved for the input.
       if (opts.verifyCitations) {
         const userText = typeof prompt === 'string' ? prompt : extractTextFromContent(prompt);
@@ -644,7 +661,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
     stream(prompt: MessageContent, extra?: Partial<GenerateTextOptions>): StreamTextResult {
       const options = overridesOf(extra);
-      return streamGmiTurn(oneShotDeps('agent.stream', extra), prompt, { options });
+      // A signal that has already aborted stops the turn before its first request (streamGmiTurn), and the stream
+      // ends with an error part.
+      return streamGmiTurn(oneShotDeps('agent.stream', extra), prompt, { options, ...callTurn(extra) });
     },
 
     session(id?: string, sessionOptions?: AgentSessionOptions): AgentSession {
