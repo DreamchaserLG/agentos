@@ -1,3 +1,9 @@
+## [0.13.87](https://github.com/framerslab/agentos/compare/v0.13.86...v0.13.87) (2026-10-13)
+
+### fix
+
+* **meetings:** a dispatch the provider refuses for good, and a report that arrives during dispatch (#376) ([df4f0b2](https://github.com/framerslab/agentos/commit/df4f0b2cf55ef9a7298fa217908ac4d9b3cd7b76))
+
 ## [0.13.86](https://github.com/framerslab/agentos/compare/v0.13.85...v0.13.86) (2026-10-13)
 
 ### fix
