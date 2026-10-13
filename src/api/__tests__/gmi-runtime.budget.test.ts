@@ -58,4 +58,20 @@ describe('a spend budget on the GMI path', () => {
     expect(primary.seen).toHaveLength(1);
     expect(fallback.seen).toHaveLength(0);
   });
+
+  it('a billed failed attempt and an outside cost are charged to the budget', async () => {
+    const k = key();
+    const billedFailure = Object.assign(new Error('overloaded'), { httpStatus: 529, details: { usage: { promptTokens: 12, completionTokens: 4, totalTokens: 16 } } });
+    script('openai', k, { replies: [reply.text('One.'), billedFailure] });
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 10_000, unpriced: 'allow' });
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100, fallbackProviders: [], budget });
+    const session = a.session('s1');
+
+    await session.send('First.');
+    expect(budget.tokensUsed()).toBe(15);
+    await expect(session.send('Second.')).rejects.toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR });
+    expect(budget.tokensUsed()).toBe(31);
+    session.recordExternalCost(0.25, { kind: 'stt' });
+    expect(budget.spentUSD()).toBeCloseTo(0.25);
+  });
 });
