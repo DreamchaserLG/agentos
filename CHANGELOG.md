@@ -1,3 +1,14 @@
+## [0.13.101](https://github.com/framerslab/agentos/compare/v0.13.100...v0.13.101) (2026-10-13)
+
+### feat
+
+* **safety:** a checked egress module for outbound HTTPS (#424) ([46ad2e9](https://github.com/framerslab/agentos/commit/46ad2e9486de4f2453655d58c680b5c5a4c5bb6d))
+
+### fix
+
+* **meetings:** an exported, idempotent upgrade of the meeting stores' schema (#427) ([8f4f62a](https://github.com/framerslab/agentos/commit/8f4f62a3c2153d0d7cb84ccf7dada55bd4675021))
+* **rag:** the Hnswlib store takes only its own file names from its manifest, and the manifest scanner checks each file against its capability's folder (#426) ([e757c15](https://github.com/framerslab/agentos/commit/e757c1588d0c3e1d71e60c113f9bca4bab06557d))
+
 ## [0.13.100](https://github.com/framerslab/agentos/compare/v0.13.99...v0.13.100) (2026-10-13)
 
 ### feat
