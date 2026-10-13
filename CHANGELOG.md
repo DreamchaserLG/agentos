@@ -1,3 +1,13 @@
+## [0.13.103](https://github.com/framerslab/agentos/compare/v0.13.102...v0.13.103) (2026-10-13)
+
+### fix
+
+* **claims:** read each array length and member once in the canonical JSON (#430) ([734249d](https://github.com/framerslab/agentos/commit/734249db00a78c77e8b00bc77f2691e14cec1f56))
+
+### test
+
+* **meetings:** pin the delivery fence's unfenced answer and the sealed creation context's run binding (#429) ([faab961](https://github.com/framerslab/agentos/commit/faab961baa439d26f9380e27c73701624713a104))
+
 ## [0.13.102](https://github.com/framerslab/agentos/compare/v0.13.101...v0.13.102) (2026-10-13)
 
 ### fix
