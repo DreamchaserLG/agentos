@@ -394,6 +394,12 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    * one, and the steps it finished stay in `messages()`, marked partial.
    */
   abortSignal?: AbortSignal;
+  /**
+   * A spend budget for this send in place of the agent's: every provider call of the send is checked against it
+   * before it is made and recorded after it (settings make a new {@link SpendBudget} for the send). With
+   * `runtime: 'gmi'`, every completion call of the turn, metaprompts included.
+   */
+  budget?: SpendBudget | SpendBudgetOptions;
 }
 
 /**
@@ -419,7 +425,7 @@ export interface AgentSession {
    * Accepts plain text or multimodal content (text + image parts).
    *
    * @param input - User message as text string or MessageContent array.
-   * @param opts - Per-send options without a `responseSchema`: the generation overrides and `abortSignal`.
+   * @param opts - Per-send options without a `responseSchema`: the generation overrides, `abortSignal` and `budget`.
    * @returns The full generation result including text, usage, and tool calls.
    */
   send(input: MessageContent, opts?: SessionSendOptions): Promise<GenerateTextResult>;
@@ -450,10 +456,11 @@ export interface AgentSession {
    *
    * @param input - User message as text string or MessageContent array.
    * @param opts - `abortSignal` ends this stream when it aborts, as {@link SessionSendOptions.abortSignal} ends a
-   *   send: the provider's stream stops and the stream ends with an `error` part. The session stays open.
+   *   send: the provider's stream stops and the stream ends with an `error` part. The session stays open. `budget`
+   *   takes the agent's place for this stream, as {@link SessionSendOptions.budget} takes it for a send.
    * @returns A {@link StreamTextResult} with async iterables and awaitable aggregates.
    */
-  stream(input: MessageContent, opts?: { abortSignal?: AbortSignal }): StreamTextResult;
+  stream(input: MessageContent, opts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }): StreamTextResult;
   /**
    * Returns a snapshot of the current conversation transcript for this
    * session in provider-replayable shape (assistant tool_calls, tool
@@ -685,6 +692,8 @@ function pickSendGenerationOverrides(
   if (sendOpts.cache !== undefined) out.cache = sendOpts.cache;
   if (sendOpts.maxTokens !== undefined) out.maxTokens = sendOpts.maxTokens;
   if (sendOpts.abortSignal !== undefined) out.abortSignal = sendOpts.abortSignal;
+  // Settings become one budget here, so a send's validation retries are charged to the same one.
+  if (sendOpts.budget !== undefined) out.budget = asSpendBudget(sendOpts.budget);
   return out;
 }
 
@@ -1172,7 +1181,7 @@ export function agent(opts: AgentOptions): Agent {
             : result;
         },
 
-        stream(input: MessageContent, streamOpts?: { abortSignal?: AbortSignal }): StreamTextResult {
+        stream(input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }): StreamTextResult {
           const textForMemory = typeof input === 'string' ? input : extractTextFromContent(input);
           const userMessage: Message = { role: 'user', content: input };
 
@@ -1189,6 +1198,8 @@ export function agent(opts: AgentOptions): Agent {
               // The caller's signal ends the stream; a stream that ends in an
               // error is added to no history (below).
               ...(streamOpts?.abortSignal ? { abortSignal: streamOpts.abortSignal } : {}),
+              // A stream's own budget takes the agent's place; without one the agent's applies.
+              ...(streamOpts?.budget !== undefined ? { budget: streamOpts.budget } : {}),
             },
             opts.memoryProvider,
             textForMemory,

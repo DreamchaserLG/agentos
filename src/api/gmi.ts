@@ -36,7 +36,7 @@ import { APPROVAL_GRANTED, askApprovalGate, type ApprovalGateFn } from './runtim
 import { runCitationVerification } from './runtime/citationVerification.js';
 import { createCompletionGateway, type CompletionAttempt, type CompletionGateway } from './runtime/completionGateway.js';
 import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
-import { asSpendBudget, assertCallWithinBudget, promptCharsOf, type SpendBudget } from './runtime/spendBudget.js';
+import { asSpendBudget, assertCallWithinBudget, promptCharsOf, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
 import { adaptTools } from './runtime/toolAdapter.js';
 import { withMembers } from './runtime/withMembers.js';
 import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
@@ -769,7 +769,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
               schemaName: sendOpts?.schemaName,
               blockLabel: sendOpts?.blockLabel,
               abortSignal: turnSignal(callerSignal),
-              budget: agentBudget,
+              // The turn's budget: the send's own (a new one from settings) in place of the agent's.
+              budget: asSpendBudget(sendOpts?.budget) ?? agentBudget,
             });
           } catch (error) {
             // Once the caller's signal has aborted, the send rejects with its
@@ -779,8 +780,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
             throw error;
           }
         },
-        stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal }) =>
-          streamGmiTurn(deps('agent.session.stream'), input, { abortSignal: turnSignal(streamOpts?.abortSignal), budget: agentBudget }),
+        stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }) =>
+          streamGmiTurn(deps('agent.session.stream'), input, { abortSignal: turnSignal(streamOpts?.abortSignal), budget: asSpendBudget(streamOpts?.budget) ?? agentBudget }),
         messages: (): SessionTranscriptMessage[] => history?.messages() ?? [],
         reseed: (snapshot: SessionTranscriptMessage[]) => {
           if (!history) throw new Error('reseed requires session history (history: false is set on this agent)');
