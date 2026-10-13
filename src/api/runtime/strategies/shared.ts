@@ -16,6 +16,7 @@ import { knownProviderPrefixOf, routedProviderOf } from '../../model.js';
 import type {
   AgencyOptions,
   AgencyQuorumConfig,
+  AgencySeatConfig,
   Agent,
   BaseAgentConfig,
   AgentCallRecord,
@@ -204,6 +205,7 @@ export function buildAgentCallUsage(
  * merged additively: agency tools serve as a base layer and agent tools
  * override on name collision. This lets an agency provide a shared tool
  * set while individual agents can override or extend it.
+ * The agency's `runtime` becomes the seat's when the seat names none.
  *
  * @param agentConfig - Per-agent configuration (takes precedence).
  * @param agencyConfig - Agency-level fallback values (base layer).
@@ -225,7 +227,7 @@ export function buildAgentCallUsage(
 export function mergeDefaults(
   agentConfig: BaseAgentConfig,
   agencyConfig: AgencyOptions
-): BaseAgentConfig {
+): AgencySeatConfig {
   // A seat whose own model names a provider (`anthropic:claude-opus-5-5`) does
   // not inherit the agency's provider, so the prefix never meets an inherited
   // `ollama`, under which a colon is never split.
@@ -246,6 +248,8 @@ export function mergeDefaults(
   const seatRouted = routedProviderOf({ provider: used.provider, model: used.model });
   const agencyRouted = routedProviderOf(agencyConfig);
   const otherVendor = agencyRouted !== undefined && seatRouted !== agencyRouted;
+  // The agency's runtime is the default engine of a config seat; the seat's own wins.
+  const runtime = (agentConfig as AgencySeatConfig).runtime ?? agencyConfig.runtime;
   return {
     // Agency-level model/provider/apiKey/baseUrl serve as defaults.
     // They are placed BEFORE the spread of agentConfig so that agent-level
@@ -258,6 +262,7 @@ export function mergeDefaults(
     // Tools are merged separately because we want additive merging
     // (agency tools + agent tools) rather than wholesale replacement.
     tools: mergeAdaptableTools(agencyConfig.tools, agentConfig.tools),
+    ...(runtime !== undefined ? { runtime } : {}),
   };
 }
 

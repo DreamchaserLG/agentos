@@ -1764,6 +1764,15 @@ export interface AgencyOptions extends BaseAgentConfig {
    * Applies to iterative strategies like `"debate"` and `"review-loop"`.
    */
   maxRounds?: number;
+  /**
+   * The engine of every config seat that names none: `'legacy'` (the default) calls the model through
+   * generateText and streamText, `'gmi'` serves each of the seat's calls with a Generalized Mind Instance
+   * (docs/GMI.md, "GMIs from agent()"). A seat's own `runtime` wins. Pre-built seats keep the engine they were
+   * built with, and the hierarchical manager and the parallel and debate synthesizers stay on the legacy engine.
+   * The agency itself takes no `cognition`: a strategy runs a config seat through its `generate()` or `stream()`,
+   * which run the `'light'` profile; seat a persistent GMI with `sessionSeat()` to run its own profile.
+   */
+  runtime?: 'legacy' | 'gmi';
 }
 
 // ---------------------------------------------------------------------------

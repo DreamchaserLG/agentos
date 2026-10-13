@@ -964,6 +964,7 @@ interface AgencySession {
  * - HITL approvals require a `handler` to be configured.
  * - `parallel` and `debate` strategies require an agency-level `model` or `provider`
  *   for their synthesis step.
+ * - `runtime`, when set, is `'legacy'` or `'gmi'`.
  *
  * @param opts - The agency options to validate.
  * @throws {AgencyConfigError} On the first validation failure encountered.
@@ -971,6 +972,11 @@ interface AgencySession {
 function validateAgencyOptions(opts: AgencyOptions): void {
   if (!opts.agents || Object.keys(opts.agents).length === 0) {
     throw new AgencyConfigError('agency() requires at least one agent in the agents roster');
+  }
+
+  // `runtime` is the config seats' default engine; anything else would reach agent() and be ignored there.
+  if (opts.runtime !== undefined && opts.runtime !== 'legacy' && opts.runtime !== 'gmi') {
+    throw new AgencyConfigError(`agency(): runtime must be 'legacy' or 'gmi', not ${JSON.stringify(opts.runtime)}`);
   }
 
   if (opts.emergent?.enabled && opts.strategy !== 'hierarchical' && !opts.adaptive) {
