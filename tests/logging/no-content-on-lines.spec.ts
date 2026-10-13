@@ -117,11 +117,16 @@ describe('no content on any output channel', () => {
   it('Ollama malformed and split line', async () => markerCapture(marker, async () => {
     const create = axios.create.bind(axios);
     vi.spyOn(axios, 'get').mockResolvedValue({ data: 'Ollama is running' });
-    const body = `${marker}\n${JSON.stringify({ model: 'test', message: { role: 'assistant', content: 'ok' }, done: true })}\n`;
-    const bytes = new TextEncoder().encode(body);
-    vi.spyOn(axios, 'create').mockImplementation(config => create({ ...config, adapter: async config => ({ status: 200, statusText: 'OK', headers: {}, config, data: Readable.from([bytes.slice(0, 9), bytes.slice(9)]) }) }));
+    // Buffers, as axios's http adapter delivers them. The malformed line arrives whole in the first chunk, so a warning
+    // that printed it would carry the marker, and the reply line is cut nine bytes in, so its text arrives only when
+    // the reader joins the two chunks.
+    const body = Buffer.from(`${marker}\n${JSON.stringify({ model: 'test', message: { role: 'assistant', content: 'ok' }, done: true })}\n`);
+    const cut = marker.length + 1 + 9;
+    vi.spyOn(axios, 'create').mockImplementation(config => create({ ...config, adapter: async config => ({ status: 200, statusText: 'OK', headers: {}, config, data: Readable.from([body.subarray(0, cut), body.subarray(cut)]) }) }));
     const provider = new OllamaProvider(); await provider.initialize({ baseURL: 'http://localhost:11434' });
-    for await (const _ of provider.generateCompletionStream('test', [{ role: 'user', content: 'hello' }], {})) { /* Drain parser. */ }
+    let text = '';
+    for await (const chunk of provider.generateCompletionStream('test', [{ role: 'user', content: 'hello' }], {})) text += chunk.responseTextDelta ?? '';
+    expect(text).toBe('ok');
   }));
   it.each(['completion', 'embedding', 'stream'] as const)('OpenRouter %s', async kind => markerCapture(marker, async () => {
     const create = axios.create.bind(axios);
@@ -131,8 +136,14 @@ describe('no content on any output channel', () => {
       throw new AxiosError('Request rejected', AxiosError.ERR_BAD_REQUEST, config, {}, { status: 400, statusText: 'Bad Request', headers: {}, config, data: { error: { message: 'Request rejected' } } });
     } }));
     const provider = new OpenRouterProvider(); await provider.initialize({ apiKey: 'test-key' });
-    if (kind === 'stream') { for await (const _ of provider.generateCompletionStream('openai/gpt-4o', [{ role: 'user', content: marker }], {})) { /* Drain parser. */ } }
-    else if (kind === 'embedding') await expect(provider.generateEmbeddings('openai/text-embedding-3-small', [marker])).rejects.toThrow();
-    else await expect(provider.generateCompletion('openai/gpt-4o', [{ role: 'user', content: marker }], {})).rejects.toThrow();
+    if (kind === 'stream') { for await (const _ of provider.generateCompletionStream('openai/gpt-4o', [{ role: 'user', content: marker }], {})) { /* Drain parser. */ } return; }
+    const request: Promise<unknown> = kind === 'embedding'
+      ? provider.generateEmbeddings('openai/text-embedding-3-small', [marker])
+      : provider.generateCompletion('openai/gpt-4o', [{ role: 'user', content: marker }], {});
+    const failure = await request.catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    // AgentOS's own statements and its callers print a caught error whole, details included, so the details must not
+    // carry the request's words.
+    console.error('Request failed', failure);
   }));
 });
