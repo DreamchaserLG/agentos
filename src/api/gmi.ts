@@ -449,7 +449,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
     const config: GMIBaseConfig = {
       workingMemory: new InMemoryWorkingMemory(),
       promptEngine: s.promptEngine,
-      llmProviderManager: new GatewayProviderManager().asProviderManager(),
+      llmProviderManager: new GatewayProviderManager(() => turn.budget).asProviderManager(),
       utilityAI: s.utilityAI,
       toolOrchestrator: hookTools(s.tools, opts.onBeforeToolExecution, step, gate),
       // The agent's memory as this GMI's session sees it: the shared store with a
