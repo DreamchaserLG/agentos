@@ -304,3 +304,40 @@ export function resolveLaunchLimits(options: AgencyLaunchOptions | RuntimeAgency
     ...(options.hitl ? { hitl: options.hitl } : {}),
   };
 }
+
+/** A tool as the seat rules read it: its name and, for a composed tool, the tools its steps call. */
+export interface SeatToolLike {
+  readonly name: string;
+  readonly stepTools?: readonly string[];
+}
+
+/**
+ * The step tools of a composed tool that `allowed` leaves out, nested compositions' steps included, first found first;
+ * `[]` for a tool whose steps are all allowed, or that is no composition (spec D11: a composed tool is admitted only
+ * when every tool its steps call, and their steps' in turn, is in the same allowlist).
+ *
+ * @param tool - The tool, or undefined.
+ * @param allowed - The seat's names.
+ * @param toolOf - The tool of a name, for a step that is itself a composition.
+ * @param seen - The steps already walked, so a composition that calls itself ends.
+ */
+export function stepsOutside(tool: SeatToolLike | undefined, allowed: ReadonlySet<string>, toolOf: (name: string) => SeatToolLike | undefined, seen: Set<string> = new Set()): string[] {
+  const outside: string[] = [];
+  for (const step of tool?.stepTools ?? []) {
+    if (!allowed.has(step)) {
+      outside.push(step);
+      continue;
+    }
+    if (seen.has(step)) continue;
+    seen.add(step);
+    outside.push(...stepsOutside(toolOf(step), allowed, toolOf, seen));
+  }
+  return outside;
+}
+
+/** Why `name` never runs in a seat, or undefined: the five self-modification tools and the memory tools. */
+export function refusedInSeat(name: string): string | undefined {
+  if ((SELF_MODIFICATION_TOOLS as readonly string[]).includes(name)) return 'a self-modification tool';
+  if ((MEMORY_TOOLS as readonly string[]).includes(name)) return 'a memory tool';
+  return undefined;
+}

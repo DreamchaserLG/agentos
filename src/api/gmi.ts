@@ -287,6 +287,12 @@ interface SessionEntry {
   userId: string;
 }
 
+/** The session options gmi() reads beside the public ones: `__seat`, set only by a seat (sessionSeat(), launch_agency). */
+interface SeatSessionOptions extends AgentSessionOptions {
+  /** The session's memory is scoped to itself and it has no learner. */
+  __seat?: { memoryScope: 'session'; learner: 'none' };
+}
+
 /** What a gmi() agent's options say about the loops its GMIs run, for the learning layer's manifest. */
 function hostLoopsOf(cognition: ResolvedCognition): Partial<Record<HostLoopName, LoopState>> {
   const off = (detail: string): LoopState => ({ live: false, detail });
@@ -658,8 +664,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
 
     session(id?: string, sessionOptions?: AgentSessionOptions): AgentSession {
       const sessionId = id ?? randomUUID();
+      const seat = (sessionOptions as SeatSessionOptions | undefined)?.__seat;
       const existing = sessions.get(sessionId);
       if (existing) {
+        // A seat runs in a session of its own: one the agent serves already is never the seat's to run in or close.
+        if (seat) throw new TypeError(`gmi(): session '${sessionId}' is open; a seat opens a session of its own`);
         if (sessionOptions?.userId !== undefined && sessionOptions.userId !== existing.userId) {
           throw new Error(`gmi(): session '${sessionId}' already runs as user '${existing.userId}'; close it to open it for another user.`);
         }
@@ -866,6 +875,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
     ...(layer ? { learning: { manifest: () => layer.manifest() } } : {}),
   };
   Object.defineProperty(handle, '__config', { value: opts, enumerable: false, configurable: true });
+  // The mark sessionSeat() and agencies.members read: this handle is a gmi() agent.
+  Object.defineProperty(handle, '__gmiHandle', { value: true, enumerable: false, configurable: true });
   return handle;
 }
 
