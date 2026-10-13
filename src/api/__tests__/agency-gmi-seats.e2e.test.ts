@@ -101,6 +101,23 @@ describe('agency() seats served by GMIs', () => {
     await expect(seat.generate('Hi.')).rejects.toThrow("'seat:lesson-1'");
   });
 
+  it('sessionSeat refuses the working-memory tools, which are memory tools', async () => {
+    // The member keeps persistent notes through the package's two working-memory tools; nothing here reads or writes the file.
+    const { MarkdownWorkingMemory } = await import('../../cognition/memory/core/working/MarkdownWorkingMemory');
+    const { ReadWorkingMemoryTool } = await import('../../cognition/memory/core/working/ReadWorkingMemoryTool');
+    const { UpdateWorkingMemoryTool } = await import('../../cognition/memory/core/working/UpdateWorkingMemoryTool');
+    const notes = new MarkdownWorkingMemory('seat-notes.md');
+    const member = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: key(), instructions: 'Keep notes.',
+      tools: { read_working_memory: new ReadWorkingMemoryTool(notes), update_working_memory: new UpdateWorkingMemoryTool(notes) },
+    });
+    // The member has both tools, so each refusal names a memory tool, not a tool the member lacks.
+    for (const name of ['read_working_memory', 'update_working_memory']) {
+      expect(() => sessionSeat(member, { tools: [name] }), name).toThrow(TypeError);
+      expect(() => sessionSeat(member, { tools: [name] }), name).toThrow(`'${name}' is a memory tool`);
+    }
+  });
+
   it('sessionSeat runs the member as itself, in one session for the run', async () => {
     const k = key();
     const s = script('openai', k, {
