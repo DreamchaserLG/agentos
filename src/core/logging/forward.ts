@@ -122,7 +122,9 @@ export function defaultRoot(): PinoLogger {
 export function forward(target: Target, level: Level, event: string, fields: Record<string, unknown>, context: Record<string, any>, strict = true): void {
   if (target.mode === 'silent') return;
   const requestId = getLoggingState().requests.getStore()?.requestId;
-  const merged = { ...context, ...(requestId ? { requestId } : {}) };
+  // Annotated: a spread keeps an index signature only when every part has one, so the inferred type would lose
+  // the context's keys (component among them).
+  const merged: Record<string, any> = { ...context, ...(requestId ? { requestId } : {}) };
   if (strict) {
     try {
       checkContext(AGENTOS_CONTEXT, merged);
