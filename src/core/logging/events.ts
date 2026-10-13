@@ -60,6 +60,8 @@ export const AGENTOS_EVENTS = {
   'llm.provider_ready': { provider, count: 'int' },
   'llm.provider_stopped': { provider },
   'llm.provider_start_failed': { provider, type: 'word', code: 'word' },
+  'llm.default_changed': { provider },
+  'llm.manager_state': { state: { enum: ['reinitializing', 'empty', 'ready', 'stopping', 'stopped'] }, count: 'int' },
   'llm.retry': { provider, status: 'int', attempt: 'int', waitMs: 'int' },
   'llm.stream_invalid': { provider, bytes: 'int', reason: { enum: ['json', 'shape', 'framing', 'mapping'] } },
   'llm.stream_failed': { provider, type: 'word', code: 'word' },
