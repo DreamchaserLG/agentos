@@ -96,4 +96,24 @@ describe('a spend budget on the GMI path', () => {
     await expect(a.generate('Hi.')).rejects.toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR });
     expect(s.seen).toHaveLength(1);
   });
+
+  it("a budget bounds a GMI's metaprompt calls, and the turn's reply stands", async () => {
+    const k = key();
+    // `whole` answers a metaprompt's unstreamed request, should one be sent.
+    const s = script('openai', k, { replies: [costly('I hear you.', 2_950), reply.text('{"mood":"calm"}')], whole: true });
+    const refused: SpendLimitInfo[] = [];
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 3_000, unpriced: 'allow', onLimitReached: (info) => { refused.push(info); } });
+    // The full profile tracks sentiment and runs the five preset metaprompts; a confused turn raises one, by its
+    // confusion words ('confused', 'unclear', 'explain'), whatever score the sentiment lexicon gives the text.
+    // memory: false: the full profile turns cognitive memory on, whose first build needs an embedding key this test does
+    // not set (gmi-runtime.memory.test.ts pins that refusal); sentiment tracking and the metaprompts stay on.
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Help.', maxTokens: 100, cognition: 'full', memory: false, budget });
+
+    const result = await a.session('s1').send('I am confused and this is unclear. Please explain it again.');
+    expect(result.text).toBe('I hear you.');
+    // The metaprompt runs after the turn, queued: its check refuses it before its request.
+    const unstreamed = () => s.seen.filter((call) => !call.streamed);
+    await vi.waitFor(() => expect(refused.map((info) => info.what), `metaprompt requests sent: ${unstreamed().length}`).toContain('gmi.metaprompt'));
+    expect(unstreamed()).toEqual([]);
+  });
 });
