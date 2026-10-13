@@ -1,3 +1,9 @@
+## [0.13.110](https://github.com/framerslab/agentos/compare/v0.13.109...v0.13.110) (2026-10-13)
+
+### fix
+
+* **safety:** serialize supplier admission, enforce lot eligibility and bind refunds (#435) ([633d5b2](https://github.com/framerslab/agentos/commit/633d5b2de0f24ae0cfbcfce32c9b3afc340afc41))
+
 ## [0.13.109](https://github.com/framerslab/agentos/compare/v0.13.108...v0.13.109) (2026-10-13)
 
 ### fix
