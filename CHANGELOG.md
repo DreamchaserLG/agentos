@@ -1,3 +1,9 @@
+## [0.13.94](https://github.com/framerslab/agentos/compare/v0.13.93...v0.13.94) (2026-10-13)
+
+### fix
+
+* **voice-pipeline:** pair a speech end with the final that came before it, and drop a final left over from a completed turn (#396) ([97e2b3b](https://github.com/framerslab/agentos/commit/97e2b3b7897a67a9688732ef6fd1e28cc8ad7131))
+
 ## [0.13.93](https://github.com/framerslab/agentos/compare/v0.13.92...v0.13.93) (2026-10-13)
 
 ### feat
