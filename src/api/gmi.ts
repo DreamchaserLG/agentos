@@ -416,17 +416,18 @@ export function gmi(opts: GmiOptions): GmiHandle {
   /**
    * A learner session for one session or one call of the agent; `undefined` when learning is off. A session
    * opened with a user id names a learner (the layer still answers with none for a placeholder id, or for an
-   * agent with neither a name nor `learning.agentKey`); a session opened without one, `generate()` and
-   * `stream()` have none. A layer that fails to open the session never fails the call: the GMI gets a session
-   * that asks again at each turn, and until one opens each turn has no learner and the GMI renders the
-   * persona's traits itself.
+   * agent with neither a name nor `learning.agentKey`); a seat session, a session opened without one,
+   * `generate()` and `stream()` have none. A layer that fails to open the session never fails the call: the GMI
+   * gets a session that asks again at each turn, and until one opens each turn has no learner and the GMI
+   * renders the persona's traits itself.
    */
-  async function learnerSessionFor(sessionId: string, personaId: string, userId: string | undefined): Promise<ILearnerSession | undefined> {
+  async function learnerSessionFor(sessionId: string, personaId: string, userId: string | undefined, noLearner = false): Promise<ILearnerSession | undefined> {
     const active = layer;
     if (!active) return undefined;
     const context: LearnerContext = { sessionId, personaId, authoredTraits };
-    // A named agent's persona id is stable; an agent without a name is named by `learning.agentKey` alone.
-    const learnerKey = userId === undefined ? null : { namespace: '', agentKey: opts.name?.trim() ? personaId : '', userId };
+    // A named agent's persona id is stable; an agent without a name is named by `learning.agentKey` alone. A seat session
+    // (sessionSeat(), launch_agency) has no learner: a team turn's input is a manager's or a sibling's text.
+    const learnerKey = userId === undefined || noLearner ? null : { namespace: '', agentKey: opts.name?.trim() ? personaId : '', userId };
     const open = (): Promise<ILearnerSession> => active.forLearner(learnerKey, context);
     try {
       return await open();
@@ -680,7 +681,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // reach another's replies. An id opened again after close() is a new
       // session, so its scope is a new id: it recalls nothing the closed one
       // filed under its scope, and only a user id the caller names again is shared.
-      const memoryScopeId = openedSessionIds.has(sessionId) ? `${sessionId}:${randomUUID()}` : sessionId;
+      // A seat session's memory scope is its own, new at each opening: it recalls nothing of the user it runs as.
+      const memoryScopeId = seat?.memoryScope === 'session' || openedSessionIds.has(sessionId) ? `${sessionId}:${randomUUID()}` : sessionId;
       // A seat session's id never enters the list agent.close() empties: a long-lived member does not grow by one id
       // per seat.
       if (cognition.memory && !seat) openedSessionIds.add(sessionId);
@@ -699,7 +701,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // first turn and ended by close(). A session that keeps no history builds a GMI per turn, and each gets it.
       const learner = retryingOnce<ILearnerSession | undefined>(async () => {
         const { persona } = await shared.get();
-        return learnerSessionFor(sessionId, persona.id, sessionOptions?.userId);
+        return learnerSessionFor(sessionId, persona.id, sessionOptions?.userId, seat?.learner === 'none');
       });
       const buildSessionGmi = async (gmiId: string): Promise<BuiltGmi> => {
         const { persona } = await shared.get();
@@ -739,15 +741,18 @@ export function gmi(opts: GmiOptions): GmiHandle {
         userId,
         // Cognitive memory files the replies under the memory scope's session and
         // the user's messages under its user: the session's own scope, a new one
-        // for an id opened again after close().
-        memoryScope: { sessionId: memoryScopeId, userId: sessionOptions?.userId ?? memoryScopeId },
+        // for an id opened again after close(). A seat session's user is its own
+        // scope too, so nothing it is told is filed under the user it runs as.
+        memoryScope: { sessionId: memoryScopeId, userId: seat?.memoryScope === 'session' ? memoryScopeId : (sessionOptions?.userId ?? memoryScopeId) },
         // Only a user id the caller passed reaches the provider's end-user field.
         providerUserId: sessionOptions?.userId,
         history,
         lock,
         // A seat session records under its ledger's own source when it names one (a temporary seat's is launch_agency).
         ledger: mergeLedger(ledger, { sessionId, source: seat ? (ledger?.source ?? source) : source }),
-        useMemoryProviderContext: !cognition.memory,
+        // A seat session's turn takes no context from the memory provider and files nothing with it.
+        useMemoryProviderContext: !cognition.memory && !seat,
+        observeMemoryProvider: !seat,
         gmiFor: gmiFor(closing !== undefined),
         onUsage: (u) => {
           accumulateUsage(tally, u);

@@ -127,8 +127,10 @@ export interface GmiSessionDeps {
    * id. Unset, they send none, as agent() sends none.
    */
   providerUserId?: string;
-  /** False when cognitive memory supplies the memory context: `memoryProvider.getContext` is then skipped. */
+  /** False when cognitive memory supplies the memory context, and on a seat session: `memoryProvider.getContext` is then skipped. */
   useMemoryProviderContext: boolean;
+  /** False on a seat session: the turn calls no `memoryProvider.observe`, which would file a team turn's text in the agent's long-term store. Default true. */
+  observeMemoryProvider?: boolean;
   /** The session store, or null when the turn keeps no history. */
   history: SessionHistoryBuffer | null;
   /** Usage ledger options for this turn's events (session id and source included). */
@@ -449,7 +451,7 @@ export async function* runGmiTurn(
         throw refusal;
       }
       writer?.commit();
-      const memoryProvider = deps.opts.memoryProvider;
+      const memoryProvider = deps.observeMemoryProvider === false ? undefined : deps.opts.memoryProvider;
       if (memoryProvider?.observe) {
         observeTurn(memoryProvider, 'user', userText);
         const reply = folder.text();
