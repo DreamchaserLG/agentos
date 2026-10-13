@@ -74,4 +74,26 @@ describe('a spend budget on the GMI path', () => {
     session.recordExternalCost(0.25, { kind: 'stt' });
     expect(budget.spentUSD()).toBeCloseTo(0.25);
   });
+
+  it('generate() takes abortSignal and budget', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Answer.')] });
+    const agentBudget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 50, unpriced: 'allow' });
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100, budget: agentBudget });
+
+    // A signal that has already aborted starts no turn.
+    const stopped = new AbortController();
+    stopped.abort(new Error('stopped by the caller'));
+    await expect(a.generate('Hi.', { abortSignal: stopped.signal })).rejects.toThrow('stopped by the caller');
+    expect(s.seen).toHaveLength(0);
+
+    // A call's budget replaces the agent's, whose 50 tokens could not cover this call.
+    const callBudget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 10_000, unpriced: 'allow' });
+    await expect(a.generate('Hi.', { budget: callBudget })).resolves.toMatchObject({ text: 'Answer.' });
+    expect([callBudget.tokensUsed(), agentBudget.tokensUsed()]).toEqual([15, 0]);
+
+    // Without one the agent's applies.
+    await expect(a.generate('Hi.')).rejects.toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR });
+    expect(s.seen).toHaveLength(1);
+  });
 });
