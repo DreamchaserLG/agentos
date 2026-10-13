@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { RateSnapshot } from '../CreditRates.js';
-import type { CreditLotRow, ICompoundCreditStore } from '../CompoundCreditStore.js';
+import { creditDay, type CreditEntryRow, type CreditLotRow, type CreditTransaction, type ICompoundCreditStore, type SupplierDayRow } from '../CompoundCreditStore.js';
 import {
   completeLotRefund,
   creditBalance,
@@ -65,6 +65,65 @@ export function expectConserved(lot: CreditLotRow | undefined): void {
   const free = lotFreeMicro(lot!);
   for (const term of [lot!.consumedMicro, lot!.heldMicro, lot!.refundedMicro, lot!.retiredMicro, free]) expect(term).toBeGreaterThanOrEqual(0);
   expect(lot!.consumedMicro + lot!.heldMicro + lot!.refundedMicro + lot!.retiredMicro + free).toBe(lot!.principalMicro);
+}
+
+/**
+ * The store, with each transaction held just after one read (the open supplier liability, or an entry) until `parties`
+ * transactions have made it or `waitMs` has passed. Transactions that queue on no common lock then all make the read
+ * before any of them writes; transactions that do queue on one wait there instead, and read one after another.
+ */
+function heldAfterRead(store: ICompoundCreditStore, read: 'openSupplierMicro' | 'getEntry', parties: number, waitMs: number): ICompoundCreditStore {
+  let reads = 0;
+  const waiting: Array<() => void> = [];
+  const meet = (): Promise<void> => {
+    reads += 1;
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, waitMs);
+      waiting.push(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+      if (reads >= parties) for (const release of waiting.splice(0)) release();
+    });
+  };
+  return {
+    withTransaction<R>(fn: (trx: CreditTransaction) => Promise<R>): Promise<R> {
+      return store.withTransaction((trx) => {
+        const held: CreditTransaction = Object.create(trx);
+        if (read === 'openSupplierMicro') {
+          held.openSupplierMicro = async (scopeId?: string): Promise<number> => {
+            const open = await trx.openSupplierMicro(scopeId);
+            await meet();
+            return open;
+          };
+        } else {
+          held.getEntry = async (entryId: string): Promise<CreditEntryRow | undefined> => {
+            const entry = await trx.getEntry(entryId);
+            await meet();
+            return entry;
+          };
+        }
+        return fn(held);
+      });
+    },
+  };
+}
+
+/** The store, refusing a supplier-day key that is not a UTC day, as a store that keeps its days in a date column does. */
+function daysKeptAsDates(store: ICompoundCreditStore): ICompoundCreditStore {
+  return {
+    withTransaction<R>(fn: (trx: CreditTransaction) => Promise<R>): Promise<R> {
+      return store.withTransaction((trx) => {
+        const dated: CreditTransaction = Object.create(trx);
+        dated.lockSupplierDay = async (day: string): Promise<SupplierDayRow> => {
+          const at = Date.parse(`${day}T00:00:00.000Z`);
+          if (!Number.isFinite(at) || creditDay(at) !== day) throw new RangeError(`${day} is not a UTC day`);
+          return trx.lockSupplierDay(day);
+        };
+        return fn(dated);
+      });
+    },
+  };
 }
 
 export function runCompoundCreditLedgerContract(
@@ -133,6 +192,26 @@ export function runCompoundCreditLedgerContract(
       expect(await reserveCompoundCredit(store, reserveInput(id, { scopeId: 'b', operationId: 'call-b', supplierDailyCapMicro: 60_000, at: nextDay, expiresAt: nextDay + 3_660_000 }))).toMatchObject({ status: 'reserved' });
     });
 
+    it.runIf(options.concurrent)('admits supplier holds one at a time on either side of midnight, so two that each fit the cap never both hold past it', async () => {
+      const { store, id } = await make();
+      for (const scope of ['a', 'b']) await grantCreditLot(store, { scopeId: id(scope), kind: 'paid', fundingRef: id(`pay-${scope}`), principalMicro: 1_000_000, at: T });
+      const racing = heldAfterRead(store, 'openSupplierMicro', 2, 3_000);
+      const nextDay = T + 2 * 60_000;
+      const results = await Promise.all([
+        reserveCompoundCredit(racing, reserveInput(id, { scopeId: 'a', operationId: 'call-a', supplierDailyCapMicro: 40_000 })),
+        reserveCompoundCredit(racing, reserveInput(id, { scopeId: 'b', operationId: 'call-b', supplierDailyCapMicro: 40_000, at: nextDay, expiresAt: nextDay + 3_660_000 })),
+      ]);
+      expect(results.map((r) => r.status).sort()).toEqual(['refused', 'reserved']);
+      expect(results.find((r) => r.status === 'refused')).toMatchObject({ reason: 'supplier_cap' });
+      expect(await store.withTransaction((trx) => trx.openSupplierMicro())).toBe(31_148);
+    });
+
+    it('admits through a store that keeps its supplier days as UTC dates, the row admissions queue on included', async () => {
+      const { store, id } = await make();
+      await grantCreditLot(store, { scopeId: id('s'), kind: 'paid', fundingRef: id('pay'), principalMicro: 1_000_000, at: T });
+      expect(await reserveCompoundCredit(daysKeptAsDates(store), reserveInput(id, { scopeId: 's', operationId: 'call' }))).toMatchObject({ status: 'reserved' });
+    });
+
     it('settles once, rounding connected time up once, consuming the shares in order', async () => {
       const { store, id } = await make();
       await grantCreditLot(store, { scopeId: id('s'), lotId: id('paid'), kind: 'paid', fundingRef: id('pay'), principalMicro: 1_000_000, at: T });
@@ -175,6 +254,28 @@ export function runCompoundCreditLedgerContract(
       expect(await reserveCompoundCredit(store, reserveInput(id, { scopeId: 's', operationId: 'call-2', at: T + 63_000, expiresAt: T + 4_000_000 }))).toMatchObject({ status: 'refused', reason: 'insufficient_credit', availableMicro: 0 });
     });
 
+    it('funds no hold from an expired promotion, whatever order the policy answers', async () => {
+      const { store, id } = await make();
+      await grantCreditLot(store, { scopeId: id('s'), lotId: id('promo'), kind: 'promotion', fundingRef: id('grant'), principalMicro: 100_000, expiresAt: T + 60_000, at: T });
+      const everyLot = (lots: readonly CreditLotRow[]): CreditLotRow[] => [...lots];
+      const late = { at: T + 61_000, expiresAt: T + 4_000_000, policy: everyLot };
+      expect(await reserveCompoundCredit(store, reserveInput(id, { scopeId: 's', operationId: 'call', ...late }))).toMatchObject({ status: 'refused', reason: 'insufficient_credit', availableMicro: 0 });
+      expect((await creditBalance(store, id('s'), T + 61_000, everyLot)).availableMicro).toBe(0);
+      expect(await lotOf(store, id('promo'))).toMatchObject({ heldMicro: 0, consumedMicro: 0 });
+    });
+
+    it('funds no hold from a closed lot, though a partial lost reversal left free principal on it', async () => {
+      const { store, id } = await make();
+      await grantCreditLot(store, { scopeId: id('s'), lotId: id('paid'), kind: 'paid', fundingRef: id('pay'), principalMicro: 1_000_000, at: T });
+      await disputeCreditLot(store, { scopeId: id('s'), lotId: id('paid'), disputeId: id('dp'), at: T + 1 });
+      expect(await resolveCreditDispute(store, { scopeId: id('s'), lotId: id('paid'), disputeId: id('dp'), outcome: 'lost', reversedMicro: 100_000, at: T + 2 })).toEqual({ status: 'resolved', receivableMicro: 0 });
+      expect(await lotOf(store, id('paid'))).toMatchObject({ state: 'closed', retiredMicro: 100_000 });
+      const paidOnly = (lots: readonly CreditLotRow[]): CreditLotRow[] => lots.filter((l) => l.kind === 'paid');
+      expect(await reserveCompoundCredit(store, reserveInput(id, { scopeId: 's', operationId: 'call', at: T + 3, policy: paidOnly }))).toMatchObject({ status: 'refused', reason: 'insufficient_credit', availableMicro: 0 });
+      expect((await creditBalance(store, id('s'), T + 3, paidOnly)).availableMicro).toBe(0);
+      expect(await lotOf(store, id('paid'))).toMatchObject({ heldMicro: 0 });
+    });
+
     it('refunds only a paid lot\'s free principal, once per refund id, and reverts a refused refund', async () => {
       const { store, id } = await make();
       await grantCreditLot(store, { scopeId: id('s'), lotId: id('paid'), kind: 'paid', fundingRef: id('pay'), principalMicro: 1_000_000, at: T });
@@ -190,6 +291,39 @@ export function runCompoundCreditLedgerContract(
       expect(await completeLotRefund(store, { scopeId: id('s'), refundId: id('r-2'), outcome: 'succeeded', at: T + 4 })).toBe('completed');
       expect(await refundCreditLot(store, { scopeId: id('s'), lotId: id('promo'), refundId: id('r-3'), amountMicro: 1, at: T })).toMatchObject({ status: 'refused', reason: 'not_paid' });
       expectConserved(await lotOf(store, id('paid')));
+    });
+
+    it('answers a refund id only for its own scope, lot and amount, and reserves nothing for another request under it', async () => {
+      const { store, id } = await make();
+      for (const [scope, lot] of [['s', 'paid-a'], ['s', 'paid-b'], ['t', 'paid-t']]) {
+        await grantCreditLot(store, { scopeId: id(scope), lotId: id(lot), kind: 'paid', fundingRef: id(lot), principalMicro: 1_000_000, at: T });
+      }
+      expect(await refundCreditLot(store, { scopeId: id('s'), lotId: id('paid-a'), refundId: id('r'), amountMicro: 100, at: T })).toEqual({ status: 'reserved', refundableMicro: 999_900 });
+      expect(await refundCreditLot(store, { scopeId: id('s'), lotId: id('paid-a'), refundId: id('r'), amountMicro: 100, at: T + 1 })).toEqual({ status: 'existing', refundableMicro: 999_900 });
+      for (const [scope, lot, amountMicro] of [['s', 'paid-a', 500], ['s', 'paid-b', 100], ['t', 'paid-t', 100]] as const) {
+        expect(await refundCreditLot(store, { scopeId: id(scope), lotId: id(lot), refundId: id('r'), amountMicro, at: T + 2 })).toEqual({ status: 'refused', reason: 'conflict', refundableMicro: 0 });
+      }
+      for (const [lot, refunded] of [['paid-a', 100], ['paid-b', 0], ['paid-t', 0]] as const) expect((await lotOf(store, id(lot)))?.refundedMicro).toBe(refunded);
+      expect(await completeLotRefund(store, { scopeId: id('t'), refundId: id('r'), outcome: 'succeeded', at: T + 3 })).toBe('not_found');
+      expect(await completeLotRefund(store, { scopeId: id('s'), refundId: id('r'), outcome: 'succeeded', at: T + 3 })).toBe('completed');
+      for (const lot of ['paid-a', 'paid-b', 'paid-t']) expectConserved(await lotOf(store, id(lot)));
+    });
+
+    it.runIf(options.concurrent)('reserves a refund id for one of two scopes racing for it, and debits no lot for the other', async () => {
+      const { store, id } = await make();
+      for (const scope of ['s', 't']) await grantCreditLot(store, { scopeId: id(scope), lotId: id(`paid-${scope}`), kind: 'paid', fundingRef: id(`pay-${scope}`), principalMicro: 1_000_000, at: T });
+      // Each scope locks only its own account, so both read the id as free before either claims it.
+      const racing = heldAfterRead(store, 'getEntry', 2, 3_000);
+      const refund = (scope: string) => refundCreditLot(racing, { scopeId: id(scope), lotId: id(`paid-${scope}`), refundId: id('r'), amountMicro: 100, at: T });
+      const [forS, forT] = await Promise.all([refund('s'), refund('t')]);
+      expect([forS.status, forT.status].sort()).toEqual(['refused', 'reserved']);
+      const [winner, loser] = forS.status === 'reserved' ? ['s', 't'] : ['t', 's'];
+      expect(forS.status === 'reserved' ? forT : forS).toEqual({ status: 'refused', reason: 'conflict', refundableMicro: 0 });
+      expect((await lotOf(store, id(`paid-${winner}`)))?.refundedMicro).toBe(100);
+      expect((await lotOf(store, id(`paid-${loser}`)))?.refundedMicro).toBe(0);
+      expect(await completeLotRefund(store, { scopeId: id(loser), refundId: id('r'), outcome: 'failed', at: T + 1 })).toBe('not_found');
+      expect(await completeLotRefund(store, { scopeId: id(winner), refundId: id('r'), outcome: 'failed', at: T + 1 })).toBe('reverted');
+      for (const scope of ['s', 't']) expectConserved(await lotOf(store, id(`paid-${scope}`)));
     });
 
     it('freezes admission on a dispute, settles the held call, and records a lost reversal past the free balance as a receivable', async () => {

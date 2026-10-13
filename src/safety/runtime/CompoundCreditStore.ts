@@ -249,7 +249,11 @@ export interface CreditTransaction {
   getEntry(entryId: string): Promise<CreditEntryRow | undefined>;
   /** Entries by time then id. */
   listEntries(filter: CreditEntryFilter): Promise<CreditEntryRow[]>;
-  /** The supplier day, made when missing and locked for the transaction. */
+  /**
+   * The supplier day, made when missing and locked for the transaction. Every reservation also locks the epoch's day,
+   * `1970-01-01`, through it before it reads {@link CreditTransaction.openSupplierMicro}: one platform-wide row that
+   * admissions queue on, kept like any other day.
+   */
   lockSupplierDay(day: string): Promise<SupplierDayRow>;
   /** Writes the supplier day by compare-and-set. */
   putSupplierDay(row: SupplierDayRow): Promise<void>;

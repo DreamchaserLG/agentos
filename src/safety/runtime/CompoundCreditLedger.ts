@@ -40,7 +40,10 @@ export interface HoldRates {
   fallbacks: readonly RateSnapshot[];
 }
 
-/** Orders a scope's lots for allocation; lots it leaves out are not used. */
+/**
+ * Orders the lots a new hold may take; lots it leaves out are not used. The ledger hands it only the scope's lots that
+ * {@link isLotEligible} admits at `at`, so no ordering can fund a hold from an expired, disputed, closed or spent lot.
+ */
 export type AllocationPolicy = (lots: readonly CreditLotRow[], at: number) => CreditLotRow[];
 
 /** A lot's free balance: what is neither consumed, held, refunded nor retired. */
@@ -64,6 +67,19 @@ export const promotionsFirstPolicy: AllocationPolicy = (lots, at) => {
   const paid = eligible.filter((l) => l.kind === 'paid').sort(tie);
   return [...promotions, ...paid];
 };
+
+/** The scope's lots a new hold may take at `at`, in the policy's order: the policy orders the eligible ones alone. */
+function allocatableLots(lots: readonly CreditLotRow[], at: number, policy: AllocationPolicy): CreditLotRow[] {
+  return policy(lots.filter((lot) => isLotEligible(lot, at)), at);
+}
+
+/**
+ * The supplier day every reservation locks before it reads the open supplier liability: the epoch's, `1970-01-01`, a UTC
+ * day like any other, so a store that keeps its days as dates accepts it. That liability spans every day, so admissions
+ * queue on this one platform-wide row: the row of the reservation's own day would let two reservations on either side
+ * of midnight both read it before either holds.
+ */
+const SUPPLIER_ADMISSION_DAY = creditDay(0);
 
 /** Throws unless `value` is a whole number at least `min`. */
 function whole(name: string, value: number, min = 0): void {
@@ -146,11 +162,11 @@ export interface CreditBalance {
   lots: Array<{ lotId: string; kind: CreditLotKind; freeMicro: number; heldMicro: number; expiresAt: number | null; state: CreditLotRow['state'] }>;
 }
 
-/** The scope's balance at `at`: available counts only the lots the policy would allocate from. */
+/** The scope's balance at `at`: available counts only the eligible lots the policy would allocate from. */
 export async function creditBalance(store: ICompoundCreditStore, scopeId: string, at: number, policy: AllocationPolicy = promotionsFirstPolicy): Promise<CreditBalance> {
   return store.withTransaction(async (trx) => {
     const lots = await trx.listLots(scopeId);
-    const eligible = policy(lots, at);
+    const eligible = allocatableLots(lots, at, policy);
     return {
       availableMicro: eligible.reduce((sum, lot) => sum + lotFreeMicro(lot), 0),
       heldMicro: lots.reduce((sum, lot) => sum + lot.heldMicro, 0),
@@ -193,7 +209,9 @@ export type ReserveCompoundCreditResult =
 /**
  * Reserves a call's most before any room, dispatch or model work: the liability is quoted here from the rates and
  * limits, the customer's side is allocated to lots in the policy's order, and the supplier's side is checked against
- * the platform's daily cap together with every hold still open, whatever day it was made on. Idempotent per operation.
+ * the platform's daily cap together with every hold still open, whatever day it was made on. Reservations that reach
+ * that check take it one at a time, on one platform-wide lock, so two on different UTC days never both read the open
+ * liability before either holds. Idempotent per operation.
  */
 export async function reserveCompoundCredit(store: ICompoundCreditStore, input: ReserveCompoundCreditInput): Promise<ReserveCompoundCreditResult> {
   whole('supplierDailyCapMicro', input.supplierDailyCapMicro, 0);
@@ -209,10 +227,11 @@ export async function reserveCompoundCredit(store: ICompoundCreditStore, input: 
       return { status: 'existing', hold: existing, allocations: await trx.listAllocations(existing.holdId), liability };
     }
     if (!account) return { status: 'refused', reason: 'no_account', availableMicro: 0, liability };
-    const ordered = policy(await trx.listLots(input.scopeId), input.at);
+    const ordered = allocatableLots(await trx.listLots(input.scopeId), input.at, policy);
     const availableMicro = ordered.reduce((sum, lot) => sum + lotFreeMicro(lot), 0);
     if (account.frozen) return { status: 'refused', reason: 'account_frozen', availableMicro, liability };
     if (availableMicro < liability.customerMicro) return { status: 'refused', reason: 'insufficient_credit', availableMicro, liability };
+    await trx.lockSupplierDay(SUPPLIER_ADMISSION_DAY);
     const day = await trx.lockSupplierDay(creditDay(input.at));
     const open = await trx.openSupplierMicro();
     if (day.settledMicro + open + liability.supplierMicro > input.supplierDailyCapMicro) {
@@ -451,21 +470,29 @@ export async function deferCompoundHold(store: ICompoundCreditStore, input: { ho
 export interface RefundCreditLotInput {
   scopeId: string;
   lotId: string;
-  /** The host's stable id for the refund; a second call with it answers the first. */
+  /**
+   * The host's stable id for the refund. A second call with it and the same scope, lot and amount answers the first;
+   * any other request under it is refused as `conflict`.
+   */
   refundId: string;
   amountMicro: number;
   at: number;
 }
 
-/** A refund reservation's answer; `refundableMicro` is the lot's free paid principal at that moment. */
+/**
+ * A refund reservation's answer; `refundableMicro` is the lot's free paid principal at that moment. `conflict`: the
+ * refund id is reserved for another scope, lot or amount, and nothing is reserved for this request.
+ */
 export type RefundCreditLotResult =
   | { status: 'reserved' | 'existing'; refundableMicro: number }
-  | { status: 'refused'; reason: 'not_found' | 'not_paid' | 'not_active' | 'insufficient_refundable'; refundableMicro: number };
+  | { status: 'refused'; reason: 'not_found' | 'not_paid' | 'not_active' | 'insufficient_refundable' | 'conflict'; refundableMicro: number };
 
 /**
  * Reserves a refund before the payment rail is asked for it: only the paid lot's free principal (neither held nor
- * consumed) can be refunded, so a refund of committed funds is refused with what can be refunded now. Confirm or revert
- * it with {@link completeLotRefund}.
+ * consumed) can be refunded, so a refund of committed funds is refused with what can be refunded now. A refund id
+ * reserved already answers `existing` only for its own scope, lot and amount; of two scopes racing for one id, one
+ * reserves it and the other is refused as `conflict`, its lot untouched. Confirm or revert it with
+ * {@link completeLotRefund}.
  */
 export async function refundCreditLot(store: ICompoundCreditStore, input: RefundCreditLotInput): Promise<RefundCreditLotResult> {
   whole('amountMicro', input.amountMicro, 1);
@@ -473,13 +500,23 @@ export async function refundCreditLot(store: ICompoundCreditStore, input: Refund
     await trx.lockAccount(input.scopeId);
     const lot = await trx.getLot(input.lotId);
     if (!lot || lot.scopeId !== input.scopeId) return { status: 'refused', reason: 'not_found', refundableMicro: 0 };
-    if (await trx.getEntry(`refund:${input.refundId}:reserved`)) return { status: 'existing', refundableMicro: lotFreeMicro(lot) };
+    const reserved = await trx.getEntry(`refund:${input.refundId}:reserved`);
+    if (reserved) {
+      // Entry ids span every scope: the id answers this request only when it reserved this very refund.
+      const same = reserved.scopeId === input.scopeId && reserved.lotId === lot.lotId && reserved.amountMicro === input.amountMicro;
+      return same ? { status: 'existing', refundableMicro: lotFreeMicro(lot) } : { status: 'refused', reason: 'conflict', refundableMicro: 0 };
+    }
     if (lot.kind !== 'paid') return { status: 'refused', reason: 'not_paid', refundableMicro: 0 };
     if (lot.state !== 'active') return { status: 'refused', reason: 'not_active', refundableMicro: 0 };
     const free = lotFreeMicro(lot);
     if (input.amountMicro > free) return { status: 'refused', reason: 'insufficient_refundable', refundableMicro: free };
     await trx.putLot({ ...lot, refundedMicro: lot.refundedMicro + input.amountMicro, version: lot.version + 1 });
-    await trx.appendEntry({ entryId: `refund:${input.refundId}:reserved`, scopeId: input.scopeId, kind: 'refund_reserved', amountMicro: input.amountMicro, lotId: lot.lotId, holdId: null, ref: input.refundId, at: input.at, day: creditDay(input.at) });
+    const entryId = `refund:${input.refundId}:reserved`;
+    // The account lock serializes one scope only, so another scope can claim this id between the read above and this
+    // append. Losing the claim rolls the debit back, and the retry answers from the claim that won.
+    if (!(await trx.appendEntry({ entryId, scopeId: input.scopeId, kind: 'refund_reserved', amountMicro: input.amountMicro, lotId: lot.lotId, holdId: null, ref: input.refundId, at: input.at, day: creditDay(input.at) }))) {
+      throw new CreditConflictError('entries', entryId);
+    }
     return { status: 'reserved', refundableMicro: free - input.amountMicro };
   });
 }
