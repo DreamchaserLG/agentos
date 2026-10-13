@@ -1,3 +1,9 @@
+## [0.13.105](https://github.com/framerslab/agentos/compare/v0.13.104...v0.13.105) (2026-10-13)
+
+### feat
+
+* **safety:** compound credit with funding lots, every-attempt budgets and a margin report (#415) ([ca25ebb](https://github.com/framerslab/agentos/commit/ca25ebbd1e0b8f41f7693d8d0832cfd1fab29ef6))
+
 ## [0.13.104](https://github.com/framerslab/agentos/compare/v0.13.103...v0.13.104) (2026-10-13)
 
 ### fix
