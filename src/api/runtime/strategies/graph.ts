@@ -41,6 +41,7 @@ import {
   checkBeforeAgent,
   accumulateExtraUsage,
   buildAgentCallUsage,
+  seatMetadataOf,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -81,7 +82,7 @@ function topoSort(
   const deps = new Map<string, Set<string>>();
   for (const name of names) {
     const config = agents[name];
-    const dependsOn = (!isAgent(config) && (config as BaseAgentConfig).dependsOn) || [];
+    const dependsOn = seatMetadataOf(config).dependsOn ?? [];
     for (const dep of dependsOn) {
       if (!nameSet.has(dep)) {
         throw new AgencyConfigError(
@@ -161,8 +162,7 @@ export function compileGraph(
               : createAgent({ ...mergeDefaults(agentOrConfig as BaseAgentConfig, agencyConfig) });
 
             // Build context from dependsOn predecessors.
-            const config = agentOrConfig as BaseAgentConfig;
-            const depNames = (!isAgent(agentOrConfig) && config.dependsOn) || [];
+            const depNames = seatMetadataOf(agentOrConfig).dependsOn ?? [];
             let context = prompt;
             if (depNames.length > 0) {
               const depOutputs = depNames
@@ -230,7 +230,7 @@ export function compileGraph(
             }
 
             const config = agentOrConfig as BaseAgentConfig;
-            const depNames = (!isAgent(agentOrConfig) && config.dependsOn) || [];
+            const depNames = seatMetadataOf(agentOrConfig).dependsOn ?? [];
 
             let context = prompt;
             if (depNames.length > 0) {

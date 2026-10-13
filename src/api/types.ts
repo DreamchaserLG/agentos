@@ -1692,6 +1692,21 @@ export interface AgencySeatConfig extends BaseAgentConfig {
   cognition?: CognitionProfile | CognitionConfig;
 }
 
+/**
+ * What a pre-built roster member may carry for the strategies, which read it as they read a seat config's:
+ * the hierarchical manager reads `description` into its roster, and the graph strategy reads `dependsOn`.
+ * `sessionSeat()` sets both on the seat it returns.
+ */
+export interface SeatMetadata {
+  /** What a hierarchical manager reads about the seat; without it the manager sees "General purpose". */
+  description?: string;
+  /**
+   * Seats this one waits for under the graph strategy. An agency that names no strategy and is not adaptive
+   * runs `graph` when any seat names `dependsOn`.
+   */
+  dependsOn?: string[];
+}
+
 // ---------------------------------------------------------------------------
 // AgencyOptions — extends BaseAgentConfig with multi-agent fields
 // ---------------------------------------------------------------------------

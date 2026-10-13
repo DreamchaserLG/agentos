@@ -64,6 +64,7 @@
  */
 
 import { compileStrategy, isAgent } from './runtime/strategies/index.js';
+import { seatMetadataOf } from './runtime/strategies/shared.js';
 import type {
   AgencyOptions,
   Agent,
@@ -144,9 +145,7 @@ export function agency(opts: AgencyOptions): Agent {
   //    Auto-detect 'graph' when any sub-agent declares `dependsOn`.
   //    `hitl.approvals.beforeTool` is not copied into the roster: it is
   //    enforced per call by the approval gate (see buildCallOptions below).
-  const hasDependsOn = Object.values(opts.agents).some(
-    (a) => !isAgent(a) && Array.isArray((a as BaseAgentConfig).dependsOn) && (a as BaseAgentConfig).dependsOn!.length > 0,
-  );
+  const hasDependsOn = Object.values(opts.agents).some((a) => (seatMetadataOf(a).dependsOn?.length ?? 0) > 0);
   const chosenStrategy = opts.adaptive
     ? 'hierarchical'
     : (opts.strategy ?? (hasDependsOn ? 'graph' : 'sequential'));
