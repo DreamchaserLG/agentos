@@ -8,7 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 import { agency } from '../agency';
 import { agent } from '../agent';
+import { gmi } from '../gmi';
 import { AgencyConfigError } from '../types';
+import { buildSessionSeat, sessionSeat } from '../runtime/agencyLaunch/sessionSeat';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 
@@ -78,5 +80,24 @@ describe('agency() seats served by GMIs', () => {
     expect(result.agentCalls.map((call) => call.agent)).toEqual(['a', 'b']);
     expect(lastUserText(s2.seen[1])).toContain('Outputs from dependencies:');
     expect(lastUserText(s2.seen[1])).toContain('[a]:\nFact A.');
+  });
+
+  it('sessionSeat refuses a legacy agent and a tool the member lacks, and a seat whose id the member has open', async () => {
+    const k = key();
+    script('openai', k, { replies: [] });
+    const legacy = agent({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'x' });
+    expect(() => sessionSeat(legacy)).toThrow(TypeError);
+    expect(() => sessionSeat(legacy)).toThrow('gmi() agent');
+    const member = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Tutor.',
+      tools: { search: { description: 'Search.', parameters: { type: 'object', properties: {} }, execute: async () => 'hit' } },
+    });
+    expect(() => sessionSeat(member, { tools: ['send_email'] })).toThrow(TypeError);
+    expect(() => sessionSeat(member, { tools: ['send_email'] })).toThrow("'send_email'");
+    // The member serves a session under the id the seat would take: the seat's first call rejects, naming it.
+    member.session('seat:lesson-1');
+    const seat = sessionSeat(member, { sessionId: 'lesson-1' });
+    await expect(seat.generate('Hi.')).rejects.toThrow(TypeError);
+    await expect(seat.generate('Hi.')).rejects.toThrow("'seat:lesson-1'");
   });
 });
