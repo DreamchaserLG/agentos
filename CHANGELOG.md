@@ -1,3 +1,9 @@
+## [0.13.85](https://github.com/framerslab/agentos/compare/v0.13.84...v0.13.85) (2026-10-13)
+
+### fix
+
+* **api:** embedText checks every input's size before the first request (#381) ([318d26a](https://github.com/framerslab/agentos/commit/318d26a7b4167beacf434faa2f59186de86651e8))
+
 ## [0.13.84](https://github.com/framerslab/agentos/compare/v0.13.83...v0.13.84) (2026-10-13)
 
 ### feat
