@@ -1,3 +1,9 @@
+## [0.13.104](https://github.com/framerslab/agentos/compare/v0.13.103...v0.13.104) (2026-10-13)
+
+### fix
+
+* **telephony:** carrier protocols and replay-safe call processing (#419) ([f9ab0fd](https://github.com/framerslab/agentos/commit/f9ab0fd41d43753d3a7b8a6b588e6a600d5d78d0))
+
 ## [0.13.103](https://github.com/framerslab/agentos/compare/v0.13.102...v0.13.103) (2026-10-13)
 
 ### fix
