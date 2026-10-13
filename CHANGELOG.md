@@ -1,3 +1,15 @@
+## [0.13.86](https://github.com/framerslab/agentos/compare/v0.13.85...v0.13.86) (2026-10-13)
+
+### fix
+
+* **guardrails:** a blocked tool call is refused before it runs, and a blocked external call leaves the saved pause (#384) ([dcfe023](https://github.com/framerslab/agentos/commit/dcfe023a5e55888b21722d490fbd57fc129eb124))
+* **meetings:** the channel's follow-ups: lease, delivery, store and transport edge cases (#386) ([d925ceb](https://github.com/framerslab/agentos/commit/d925cebc6e9d705609f4e1ec5099914079b1d26c))
+
+### docs
+
+* correct the GMI paper's T1 grading, preset moods and gate re-run cap (#385) ([4f649e6](https://github.com/framerslab/agentos/commit/4f649e6ad9759a06966227a82987869f258ab11c))
+* fourteenth round of audit follow-ups (the P2 leftovers of the cold reads) (#377) ([0a7da7d](https://github.com/framerslab/agentos/commit/0a7da7dd622791ed7a5427386f3aa3f0ffe83b81))
+
 ## [0.13.85](https://github.com/framerslab/agentos/compare/v0.13.84...v0.13.85) (2026-10-13)
 
 ### fix
