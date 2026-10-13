@@ -1,3 +1,9 @@
+## [0.13.113](https://github.com/framerslab/agentos/compare/v0.13.112...v0.13.113) (2026-10-13)
+
+### fix
+
+* **voice-pipeline:** drop a late final that arrives while the next utterance is spoken (#442) ([653c38d](https://github.com/framerslab/agentos/commit/653c38de3150189d2537cfe008cc210f7a6ada51))
+
 ## [0.13.112](https://github.com/framerslab/agentos/compare/v0.13.111...v0.13.112) (2026-10-13)
 
 ### fix
