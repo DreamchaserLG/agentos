@@ -1,3 +1,10 @@
+## [0.13.109](https://github.com/framerslab/agentos/compare/v0.13.108...v0.13.109) (2026-10-13)
+
+### fix
+
+* **agency:** the beforeAgent check reads the task and earlier agents' output on their own under graph, review-loop and debate (#397) ([26d1eb8](https://github.com/framerslab/agentos/commit/26d1eb8ffefef9c5aa5a39ba890d0f917eed0fb1))
+* **meetings:** fold of the meeting channel's review findings: the purged event's fields, the report time, the guide and the pricing note (#436) ([b86bb29](https://github.com/framerslab/agentos/commit/b86bb2915804470603043a1c1bfcd5384df8a48d))
+
 ## [0.13.108](https://github.com/framerslab/agentos/compare/v0.13.107...v0.13.108) (2026-10-13)
 
 ### feat
