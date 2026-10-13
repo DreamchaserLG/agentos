@@ -574,10 +574,11 @@ export function gmi(opts: GmiOptions): GmiHandle {
   /**
    * The session ids opened since the sessions' memory was built: an id opened
    * again after its close() is given a memory scope of its own. Only an agent
-   * with cognitive memory keeps them, since only memory reads the scope. An id
-   * stays after session.close(), so that its next opening does not reach the
-   * closed session's memory; agent.close() starts a new memory and empties the
-   * set. One entry per id, kept while the memory keeps that session's traces.
+   * with cognitive memory keeps them, since only memory reads the scope, and it
+   * never keeps a seat session's id. An id stays after session.close(), so that
+   * its next opening does not reach the closed session's memory; agent.close()
+   * starts a new memory and empties the set. One entry per id, kept while the
+   * memory keeps that session's traces.
    */
   const openedSessionIds = new Set<string>();
   const agentTally = createEmptyUsageAggregate();
@@ -680,7 +681,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // session, so its scope is a new id: it recalls nothing the closed one
       // filed under its scope, and only a user id the caller names again is shared.
       const memoryScopeId = openedSessionIds.has(sessionId) ? `${sessionId}:${randomUUID()}` : sessionId;
-      if (cognition.memory) openedSessionIds.add(sessionId);
+      // A seat session's id never enters the list agent.close() empties: a long-lived member does not grow by one id
+      // per seat.
+      if (cognition.memory && !seat) openedSessionIds.add(sessionId);
       const userId = sessionOptions?.userId ?? sessionId;
       const history = opts.history === false ? null : new SessionHistoryBuffer({ ...SESSION_HISTORY_DEFAULTS, ...(opts.history ?? {}) });
       if (!sessionTallies.has(sessionId)) sessionTallies.set(sessionId, createEmptyUsageAggregate(sessionId));
@@ -742,7 +745,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         providerUserId: sessionOptions?.userId,
         history,
         lock,
-        ledger: mergeLedger(ledger, { sessionId, source }),
+        // A seat session records under its ledger's own source when it names one (a temporary seat's is launch_agency).
+        ledger: mergeLedger(ledger, { sessionId, source: seat ? (ledger?.source ?? source) : source }),
         useMemoryProviderContext: !cognition.memory,
         gmiFor: gmiFor(closing !== undefined),
         onUsage: (u) => {
@@ -815,6 +819,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         close: () =>
           (closing ??= (async () => {
             if (sessions.get(sessionId) === entry) sessions.delete(sessionId);
+            // A seat session's tally goes with it: the agent's tally holds its usage (each turn adds to both).
+            if (seat) sessionTallies.delete(sessionId);
             stopTurns.abort();
             const release = await lock.acquire();
             try {
