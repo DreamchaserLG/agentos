@@ -1,3 +1,9 @@
+## [0.13.114](https://github.com/framerslab/agentos/compare/v0.13.113...v0.13.114) (2026-10-13)
+
+### feat
+
+* **voice-pipeline:** add on-device Moonshine speech-to-text for the browser, the STT chain in the browser entry and a client transcript message (#300) ([3ec472e](https://github.com/framerslab/agentos/commit/3ec472eea8b83cda33ebb69aa1cfa5043d5e51a1))
+
 ## [0.13.113](https://github.com/framerslab/agentos/compare/v0.13.112...v0.13.113) (2026-10-13)
 
 ### fix
