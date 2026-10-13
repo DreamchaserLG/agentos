@@ -1,3 +1,9 @@
+## [0.13.108](https://github.com/framerslab/agentos/compare/v0.13.107...v0.13.108) (2026-10-13)
+
+### feat
+
+* **voice-platform:** durable calls and scoped credentials (#431) ([32a2106](https://github.com/framerslab/agentos/commit/32a2106a9bad21b95a92325a0fecfba0c63b5797))
+
 ## [0.13.107](https://github.com/framerslab/agentos/compare/v0.13.106...v0.13.107) (2026-10-13)
 
 ### feat
