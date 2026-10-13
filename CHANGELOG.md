@@ -1,3 +1,9 @@
+## [0.13.84](https://github.com/framerslab/agentos/compare/v0.13.83...v0.13.84) (2026-10-13)
+
+### feat
+
+* **api:** embedText sends a long list in requests the provider takes (#379) ([35592b7](https://github.com/framerslab/agentos/commit/35592b7b2523943168308335e4d57d25377f6516))
+
 ## [0.13.83](https://github.com/framerslab/agentos/compare/v0.13.82...v0.13.83) (2026-10-13)
 
 ### feat
