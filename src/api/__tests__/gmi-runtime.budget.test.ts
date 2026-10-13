@@ -116,4 +116,15 @@ describe('a spend budget on the GMI path', () => {
     await vi.waitFor(() => expect(refused.map((info) => info.what), `metaprompt requests sent: ${unstreamed().length}`).toContain('gmi.metaprompt'));
     expect(unstreamed()).toEqual([]);
   });
+
+  it('a session send takes a per-send budget, on the GMI engine and on the legacy one', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Unused.')], whole: true });
+    const tiny = () => new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 50, unpriced: 'allow' });
+    const onGmi = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100 });
+    await expect(onGmi.session('g').send('Hi.', { budget: tiny() })).rejects.toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringContaining('Token cap exceeded') });
+    const onLegacy = agent({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100 });
+    await expect(onLegacy.session('l').send('Hi.', { budget: tiny() })).rejects.toThrow(/Token cap exceeded/);
+    expect(s.seen).toHaveLength(0);
+  });
 });
