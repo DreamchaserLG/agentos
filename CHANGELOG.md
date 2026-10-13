@@ -1,3 +1,9 @@
+## [0.13.102](https://github.com/framerslab/agentos/compare/v0.13.101...v0.13.102) (2026-10-13)
+
+### fix
+
+* **claims:** write array holes as null in the canonical JSON (#428) ([a55d13b](https://github.com/framerslab/agentos/commit/a55d13bc33fc1f449ecfedab314aca0289fe0f63))
+
 ## [0.13.101](https://github.com/framerslab/agentos/compare/v0.13.100...v0.13.101) (2026-10-13)
 
 ### feat
