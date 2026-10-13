@@ -1,3 +1,10 @@
+## [0.13.111](https://github.com/framerslab/agentos/compare/v0.13.110...v0.13.111) (2026-10-13)
+
+### fix
+
+* **orchestration:** a parallel batch keeps every branch artifact and state, and a branch interrupt is yielded once (#398) ([b0f6208](https://github.com/framerslab/agentos/commit/b0f62081d0e873103dfb186196fb443092848adb))
+* **safety:** recheck the fence before a legacy reconcile settles an expired hold (#440) ([8a8a151](https://github.com/framerslab/agentos/commit/8a8a1514e81f5090f8d75171a0dc494d8e1e6ccc))
+
 ## [0.13.110](https://github.com/framerslab/agentos/compare/v0.13.109...v0.13.110) (2026-10-13)
 
 ### fix
