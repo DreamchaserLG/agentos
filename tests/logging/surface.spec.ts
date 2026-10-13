@@ -82,6 +82,10 @@ describe('the logging hand-over', () => {
     expect(parseLogLevel({})).toEqual({ level: 'info', unknown: false });
     expect(parseLogLevel({ AGENTOS_DEBUG: '1' }).level).toBe('debug');
     expect(parseLogLevel({ AGENTOS_LOG_LEVEL: 'silent' }).level).toBe('silent');
+    // The providers' start-up lines are debug events filtered at the root's level, so the root reads AGENTOS_DEBUG=true
+    // and a level name in any case, as the checks those lines carried did.
+    expect(parseLogLevel({ AGENTOS_DEBUG: 'true' }).level).toBe('debug');
+    expect(parseLogLevel({ AGENTOS_LOG_LEVEL: 'DEBUG' })).toEqual({ level: 'debug', unknown: false });
     vi.stubEnv('AGENTOS_LOG_LEVEL', 'sk-marker');
     const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     // pino writes to process.stdout itself once its write has been replaced, so the spy receives the root's lines.
