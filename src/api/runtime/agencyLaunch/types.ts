@@ -19,8 +19,23 @@ export const LAUNCH_AGENCY_TOOL_NAME = 'launch_agency';
 export const LAUNCH_CAPABILITY = 'agency:launch';
 /** The five self-modification tools, which a seat never gets. */
 export const SELF_MODIFICATION_TOOLS = ['forge_tool', 'create_workflow', 'manage_skills', 'self_evaluate', 'adapt_personality'] as const;
-/** The memory tools of src/cognition/memory/io/tools/: never in a seat's names (spec D5). */
-export const MEMORY_TOOLS = ['memory_add', 'memory_update', 'memory_delete', 'memory_merge', 'memory_search', 'memory_reflect', 'read_memory_page', 'rehydrate_memory'] as const;
+/**
+ * The memory tools: never in a seat's names (spec D5). The eight of src/cognition/memory/io/tools/, and the two
+ * working-memory tools, which read and replace the agent's persistent markdown working memory (its profile of its
+ * users and its notes across conversations).
+ */
+export const MEMORY_TOOLS = [
+  'memory_add',
+  'memory_update',
+  'memory_delete',
+  'memory_merge',
+  'memory_search',
+  'memory_reflect',
+  'read_memory_page',
+  'rehydrate_memory',
+  'read_working_memory',
+  'update_working_memory',
+] as const;
 /** How long a launch waits, once its signal aborted or its run resolved, for the run to settle and the team to close. */
 export const LAUNCH_SETTLE_GRACE_MS = 5_000;
 /** The longest `text` a launch returns. */
