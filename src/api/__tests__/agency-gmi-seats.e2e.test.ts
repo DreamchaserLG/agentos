@@ -100,4 +100,43 @@ describe('agency() seats served by GMIs', () => {
     await expect(seat.generate('Hi.')).rejects.toThrow(TypeError);
     await expect(seat.generate('Hi.')).rejects.toThrow("'seat:lesson-1'");
   });
+
+  it('sessionSeat runs the member as itself, in one session for the run', async () => {
+    const k = key();
+    const s = script('openai', k, {
+      replies: [
+        reply.tools([{ id: 'd1', name: 'delegate_to_tutor', args: { task: 'Explain recursion.' } }]),
+        reply.text('Recursion calls itself.'),
+        reply.tools([{ id: 'd2', name: 'delegate_to_tutor', args: { task: 'Give an example.' } }]),
+        reply.text('factorial(n) calls factorial(n - 1).'),
+        reply.text('Done.'),
+        reply.text('Hello again.'),
+      ],
+      whole: true,
+    });
+    const member = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, name: 'Tutor', instructions: 'You are the tutor. Explain clearly.' });
+    const seat = sessionSeat(member);
+    const team = agency({ provider: 'openai', model: 'stub-model', apiKey: k, strategy: 'hierarchical', agents: { tutor: seat } });
+
+    const result = (await team.generate('Teach recursion.')) as { text: string };
+    expect(result.text).toBe('Done.');
+    // The manager (agent()'s legacy path) asks for whole responses; the member's GMI streams.
+    const tutorCalls = s.seen.filter((call) => call.streamed);
+    expect(tutorCalls).toHaveLength(2);
+    for (const call of tutorCalls) expect(systemText(call)).toContain('You are the tutor. Explain clearly.');
+    // One session for the run: the second delegation's request holds the first exchange.
+    const second = JSON.stringify(tutorCalls[1].messages);
+    expect(second).toContain('Explain recursion.');
+    expect(second).toContain('Recursion calls itself.');
+    // The manager reads the member's own description.
+    expect(systemText(s.seen[0])).toContain('- tutor: You are the tutor. Explain clearly.');
+
+    await team.close();
+    await expect(seat.generate('Again.')).rejects.toThrow('seat closed');
+    // agency().close() closed the seat's session and left the member serving its own users.
+    await expect(member.session('own').send('Hello?')).resolves.toMatchObject({ text: 'Hello again.' });
+    // The seat session's tally went with it; the agent's tally holds its usage.
+    expect((await member.usage(seat.seatId)).totalTokens).toBe(0);
+    expect((await member.usage()).totalTokens).toBeGreaterThan(0);
+  });
 });
