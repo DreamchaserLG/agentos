@@ -1702,7 +1702,7 @@ export interface SeatMetadata {
   description?: string;
   /**
    * Seats this one waits for under the graph strategy. An agency that names no strategy and is not adaptive
-   * runs `graph` when any seat names `dependsOn`.
+   * runs `graph` when any seat's `dependsOn` lists a seat.
    */
   dependsOn?: string[];
 }
