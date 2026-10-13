@@ -1,0 +1,61 @@
+/**
+ * A spend budget on the GMI path, end to end: gmi() with `budget` (the agent's, a call's, a send's), the completion
+ * gateway's check before every step, the GMI provider manager's check before every metaprompt, and the charges the
+ * turn runner records. Only the provider classes are stubbed (helpers/stubProviders.ts), at their module boundary.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
+// The fallback hop's provider, stubbed as gmi-runtime.fallback.test.ts stubs it.
+vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
+import { gmi } from '../gmi';
+import { agent } from '../agent';
+import { SpendBudget, type SpendLimitInfo } from '../runtime/spendBudget';
+import { GMIErrorCode } from '../../core/utils/errors';
+import { reply, script } from './helpers/stubProviders';
+import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
+
+let n = 0;
+const key = () => `k-budget-${++n}`;
+/** A reply whose usage is `total` tokens. */
+const costly = (text: string, total: number) => reply.text(text, 'stub-model', { promptTokens: total - 50, completionTokens: 50, totalTokens: total });
+
+beforeEach(() => globalLLMProviderHealth.reset());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
+
+describe('a spend budget on the GMI path', () => {
+  it('gmi() takes a budget, and a step past it is refused before the provider is called', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [costly('One.', 2_950), reply.text('Two.')] });
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 3_000, unpriced: 'allow' });
+    const a = gmi({ provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100, budget });
+    const session = a.session('s1');
+
+    await expect(session.send('First.')).resolves.toMatchObject({ text: 'One.' });
+    expect(budget.tokensUsed()).toBe(2_950);
+    // 2,950 counted: the next step's estimate (its prompt and its 100 output tokens) passes 3,000.
+    await expect(session.send('Second.')).rejects.toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringContaining('Token cap exceeded') });
+    expect(s.seen).toHaveLength(1);
+  });
+
+  it('a fallback hop is checked with the output cap it sends', async () => {
+    const k = key();
+    const fb = key();
+    const primary = script('openai', k, { replies: [Object.assign(new Error('overloaded'), { httpStatus: 529 })] });
+    const fallback = script('anthropic', fb, { replies: [reply.text('Unused.')] });
+    vi.stubEnv('ANTHROPIC_API_KEY', fb);
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 3_000, unpriced: 'allow' });
+    // The route's 100 output tokens fit the cap; the fallback hop sends 100 + 5,000 of headroom (fallbackHopOverrides).
+    const a = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100, budget,
+      fallbackProviders: [{ provider: 'anthropic', model: 'claude-x', maxTokensHeadroom: 5_000 }],
+    });
+
+    await expect(a.session('s1').send('Hi.')).rejects.toMatchObject({ code: GMIErrorCode.LLM_PROVIDER_ERROR, message: expect.stringContaining('Token cap exceeded') });
+    // The primary's request went out and failed (the precondition); the fallback's was refused before it was sent.
+    expect(primary.seen).toHaveLength(1);
+    expect(fallback.seen).toHaveLength(0);
+  });
+});
