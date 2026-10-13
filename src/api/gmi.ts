@@ -34,8 +34,9 @@ import { ExtensionRegistry } from '../extensions/ExtensionRegistry.js';
 import { EXTENSION_KIND_TOOL } from '../extensions/types.js';
 import { APPROVAL_GRANTED, askApprovalGate, type ApprovalGateFn } from './runtime/approval-gate.js';
 import { runCitationVerification } from './runtime/citationVerification.js';
-import { createCompletionGateway, type CompletionGateway } from './runtime/completionGateway.js';
+import { createCompletionGateway, type CompletionAttempt, type CompletionGateway } from './runtime/completionGateway.js';
 import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
+import { asSpendBudget, assertCallWithinBudget, promptCharsOf, type SpendBudget } from './runtime/spendBudget.js';
 import { adaptTools } from './runtime/toolAdapter.js';
 import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
 import { personaFromAgentOptions } from './runtime/gmiPersona.js';
@@ -59,11 +60,8 @@ export type GmiOptions = AgentOptions;
 /** The handle {@link gmi} returns: the `Agent` surface. */
 export type GmiHandle = Agent;
 
-/**
- * Options with no GMI-path implementation yet; set, they throw at construction. A `budget` would go unenforced, since
- * a GMI's model calls do not pass through generateText or streamText.
- */
-const UNSUPPORTED_ON_GMI = ['voice', 'avatar', 'channels', 'budget'] as const;
+/** Options with no GMI-path implementation yet; set, they throw at construction. */
+const UNSUPPORTED_ON_GMI = ['voice', 'avatar', 'channels'] as const;
 /**
  * Per-call overrides generate() and stream() accept on the GMI path (spec D10),
  * and the tool-approval gate `agency()` passes with every call to a member.
@@ -256,6 +254,20 @@ function mergeLedger(...parts: Array<AgentOSUsageLedgerOptions | undefined>): Ag
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
+/**
+ * An attempt the turn's budget refused: it sends no request and fails its hop with no retry, so the GMI ends the
+ * turn (`LLM_PROVIDER_ERROR`, the budget's message) without trying a fallback hop.
+ */
+function refusedAttempt(refusal: unknown): CompletionAttempt {
+  const error = refusal instanceof Error ? refusal : new Error(String(refusal));
+  return {
+    async *[Symbol.asyncIterator]() {
+      // Nothing is sent.
+    },
+    outcome: Promise.resolve({ kind: 'hopFailed' as const, error, retryable: false }),
+  };
+}
+
 async function recordedUsage(ledger: AgentOSUsageLedgerOptions | undefined, sessionId?: string): Promise<AgentOSUsageAggregate> {
   // Imported on use, as agent() imports it: the ledger reads files.
   const { getRecordedAgentOSUsage } = await import('./runtime/usageLedger.js');
@@ -307,8 +319,9 @@ function hostLoopsOf(cognition: ResolvedCognition): Partial<Record<HostLoopName,
 /**
  * An agent whose sessions are GMIs (docs/GMI.md, "GMIs from agent()").
  *
- * @param opts - The options of `agent()`. `voice`, `avatar`, `channels` and `budget` throw when set;
- *   a config that sets only `enabled: false` is unset.
+ * @param opts - The options of `agent()`. `voice`, `avatar` and `channels` throw when set;
+ *   a config that sets only `enabled: false` is unset. `budget` checks every completion call a GMI makes
+ *   (docs/GMI.md, "Spend budget").
  * @returns The `Agent` surface: `generate`, `stream`, `session`, `usage`, `close`, `export`.
  * @throws {Error} At construction, naming the option: an option the GMI path
  *   cannot honour, an unknown cognition profile or metaprompt preset, a
@@ -354,6 +367,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
   const ledger = mergeLedger((opts.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? opts.usageLedger);
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
   const gateway = gatewayFor(opts);
+  // One budget for the agent, as agent() keeps one: every turn with no budget of its own is checked against it.
+  const agentBudget: SpendBudget | undefined = asSpendBudget(opts.budget);
 
   const shared = retryingOnce<Shared>(async () => {
     // Throws, as generateText throws, when no provider or model resolves.
@@ -458,8 +473,21 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // to the turn that made the call, which meters and counts it.
       completionGateway: {
         resolve: gateway.resolve,
-        stream: (resolution, messages, options, responseSchema, schemaName, schemaInPrompt) =>
-          gateway.stream(resolution, messages, options, responseSchema, schemaName, schemaInPrompt, turn.onLateUsage),
+        stream: (resolution, messages, options, responseSchema, schemaName, schemaInPrompt) => {
+          // The turn's budget is checked before every attempt; a refusal sends nothing.
+          const budget = turn.budget;
+          if (budget) {
+            // The options the gateway sends for this hop: a fallback hop's overrides raise maxTokens by its headroom
+            // (fallbackHopOverrides in generateText.ts), so the estimate counts that cap.
+            const sent = { ...options, ...resolution.optionOverrides };
+            try {
+              assertCallWithinBudget(budget, resolution, promptCharsOf(messages, undefined, sent.tools), sent.maxTokens, 'gmi.step');
+            } catch (refusal) {
+              return refusedAttempt(refusal);
+            }
+          }
+          return gateway.stream(resolution, messages, options, responseSchema, schemaName, schemaInPrompt, turn.onLateUsage);
+        },
         schemaInstruction: gateway.schemaInstruction,
       },
       maxToolLoopIterations: steps,
@@ -732,6 +760,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
               schemaName: sendOpts?.schemaName,
               blockLabel: sendOpts?.blockLabel,
               abortSignal: turnSignal(callerSignal),
+              budget: agentBudget,
             });
           } catch (error) {
             // Once the caller's signal has aborted, the send rejects with its
@@ -742,7 +771,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
           }
         },
         stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal }) =>
-          streamGmiTurn(deps('agent.session.stream'), input, { abortSignal: turnSignal(streamOpts?.abortSignal) }),
+          streamGmiTurn(deps('agent.session.stream'), input, { abortSignal: turnSignal(streamOpts?.abortSignal), budget: agentBudget }),
         messages: (): SessionTranscriptMessage[] => history?.messages() ?? [],
         reseed: (snapshot: SessionTranscriptMessage[]) => {
           if (!history) throw new Error('reseed requires session history (history: false is set on this agent)');

@@ -32,6 +32,7 @@ import type { AgentMemoryProvider, AgentOptions } from '../agent.js';
 import { DEFAULT_MEMORY_TOKEN_BUDGET, MEMORY_TIMEOUT_MS } from './memoryProviderHooks.js';
 import type { AgentOSUsageLedgerOptions } from './usageLedger.js';
 import type { LateAttemptUsage } from './completionGateway.js';
+import { costOfUsageUSD, type SpendBudget } from './spendBudget.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 
@@ -62,6 +63,12 @@ export interface GmiTurnOptions {
   /** Stops the turn: the model call in progress is aborted, and the turn ends with the abort error. */
   abortSignal?: AbortSignal;
   /**
+   * The turn's spend budget: the completion gateway checks it before each model call of the turn (a refusal ends the
+   * turn), the GMI's provider manager before each metaprompt and self-reflection call, and the turn records each
+   * finished step, each billed failed attempt and each late usage report into it.
+   */
+  budget?: SpendBudget;
+  /**
    * Checks the reply of a turn that ended without error, before the session
    * keeps it. A throw keeps nothing of the turn (no history, no
    * `memoryProvider.observe`) and is the turn's error: a structured send whose
@@ -86,6 +93,8 @@ export interface GmiTurnContext {
    * arrives once the turn has ended.
    */
   onLateUsage?: (report: LateAttemptUsage) => void;
+  /** The turn's spend budget ({@link GmiTurnOptions.budget}), for the GMI's gateway and provider manager. */
+  budget?: SpendBudget;
 }
 
 /** The GMI that serves one turn. */
@@ -172,6 +181,19 @@ function observeTurn(provider: AgentMemoryProvider, role: 'user' | 'assistant', 
   } catch (observeError) {
     console.warn('[agentos] memoryProvider.observe failed:', observeError);
   }
+}
+
+/**
+ * Charges one model call of the turn to the turn's budget: the provider's reported cost, or its token counts at the
+ * model's price (`costOfUsageUSD`), and its tokens. Nothing without a budget or a usage report.
+ */
+function chargeBudget(budget: SpendBudget | undefined, providerId: string | undefined, modelId: string | undefined, report: unknown, what: string): void {
+  if (!budget || !report) return;
+  const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  addModelUsage(usage, report);
+  const tokens = usage.totalTokens > 0 ? usage.totalTokens : usage.promptTokens + usage.completionTokens;
+  const cost = providerId && modelId ? costOfUsageUSD(providerId, modelId, usage) : usage.costUSD;
+  budget.record(cost, tokens, what);
 }
 
 /**
@@ -319,6 +341,7 @@ export async function* runGmiTurn(
       memoryContext,
       onModelCall: ({ providerId, modelId }) => folder.route(providerId, modelId),
       structured: turn.responseSchema !== undefined,
+      budget: turn.budget,
       // The bill a provider reports for a call this turn stopped (close() during
       // the call) arrives after the turn has ended: it is metered and counted
       // as a failed attempt's, as a billed failure during the turn is.
@@ -379,6 +402,7 @@ export async function* runGmiTurn(
               startedAt: callStartedAt,
             }),
           );
+          chargeBudget(turn.budget, step.providerId, step.modelId, step.usage, 'gmi.step');
           callStartedAt = Date.now();
           break;
         }

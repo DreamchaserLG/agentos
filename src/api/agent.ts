@@ -162,7 +162,8 @@ export interface AgentOptions extends BaseAgentConfig {
    * One spend budget for every call this agent and its sessions make: each provider call is checked against what is
    * left before it is made and recorded after it, and {@link AgentSession.recordExternalCost} charges costs made
    * outside AgentOS to it. Settings make one {@link SpendBudget} for the agent; pass an instance to share it wider.
-   * Not available with `runtime: 'gmi'`, which throws at construction.
+   * With `runtime: 'gmi'` every completion call a GMI makes is checked against it before it is sent, metaprompts and
+   * self-reflection included; its cognitive memory's embeddings and the learning layer's own calls are not counted.
    */
   budget?: SpendBudget | SpendBudgetOptions;
   /**
