@@ -9,6 +9,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { ITranscriptInputSink, TranscriptTurn } from '../../voice-pipeline/types.js';
+import type { IDurableInbox } from './DurableInbox.js';
 import type { DispatchResult, IMeetingBotProvider, ProviderCommand, ProviderEventContext } from './IMeetingBotProvider.js';
 import type { MeetingRoom, MeetingRoomHandle } from './MeetingRoom.js';
 import { MeetingTranscriptSink } from './MeetingTranscriptSink.js';
@@ -28,9 +29,11 @@ import {
   type MeetingRunRecord,
   type MeetingRunState,
   type NormalizedMeetingEvent,
+  type PendingSupplierUsage,
   type ProviderEventType,
   type SendBotRequest,
   type SendBotResult,
+  type SupplierUsage,
 } from './types.js';
 
 /** The stores and hooks a manager keeps its runs in. */
@@ -49,6 +52,14 @@ export interface MeetingManagerStores {
   entitlement: IEntitlementHook;
   /** The clock the manager measures every limit on. */
   clock: IClock;
+  /**
+   * Optional. Where supplier totals wait when the entitlement hook's `recordSupplierUsage` refuses them (a report's, or
+   * those a provider's usage answers at reconciliation), until the next {@link MeetingManager.reconcile} hands them over
+   * again; a durable inbox (`SqlDurableInbox`) keeps them across a restart. A refusal holds back no run either way: the
+   * report is applied, and a run whose worker is gone still ends. Without an inbox, the hook's error is thrown once the
+   * report is applied, or at the end of the reconcile pass.
+   */
+  supplierUsageInbox?: IDurableInbox<PendingSupplierUsage>;
 }
 
 /** How a host builds a {@link MeetingManager}: its stores, its room helper, its routes and its limits. */
@@ -117,11 +128,31 @@ interface StoredEvent {
   repeated: boolean;
 }
 
+/**
+ * Thrown by a provider's `dispatch` when the run will never be allowed to start: the platform refused it for good
+ * (the caller lacks the permission, the account forbids it), or no worker has a slot. The manager ends the run at once
+ * with the reason, unbilled, and never retries it. Any other error from `dispatch` is treated as a fault of the moment
+ * and retried. The message is shown to no one by the library; a host may read it from the `bot:left` event.
+ */
+export class DispatchRefusedError extends Error {
+  /**
+   * @param reason - The reason the run ends with.
+   * @param message - The provider's word for why, from a fixed list of its own; it reaches `bot:left`, so it carries nothing of the meeting.
+   */
+  constructor(
+    readonly reason: Extract<MeetingLeaveReason, 'no_capacity' | 'permission_denied'>,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'DispatchRefusedError';
+  }
+}
+
 /** Thrown by a provider's `dispatch` when no worker has a slot. */
-export class NoCapacityError extends Error {
+export class NoCapacityError extends DispatchRefusedError {
   /** @param message - Why no worker took the run. */
   constructor(message = 'no worker has a free slot') {
-    super(message);
+    super('no_capacity', message);
     this.name = 'NoCapacityError';
   }
 }
@@ -556,23 +587,29 @@ export class MeetingManager {
     if (leaseLost) return;
     const { recorded, cancelled } = await this.stores.jobs.markDispatched(run.runId, this.id, result.workerId);
     if (!recorded) return;
-    const dispatched = await this.stores.runs.update(run.runId, { dispatch: { ...withDispatch.dispatch!, workerId: result.workerId, providerRunRef: result.providerRunRef } }, 'dispatching');
-    if (dispatched) await this.emit('bot:dispatching', dispatched, { workerId: result.workerId });
+    // a report may have moved the run on while the provider's call was in flight: the worker's id is written whatever active state the run reached
+    const dispatched = await this.stores.runs.update(run.runId, { dispatch: { ...withDispatch.dispatch!, workerId: result.workerId, providerRunRef: result.providerRunRef } }, ACTIVE_STATES);
+    if (dispatched?.state === 'dispatching') await this.emit('bot:dispatching', dispatched, { workerId: result.workerId });
+    // A cancellation received during dispatch becomes a leave in whichever active state the report reached.
     if (cancelled) await this.leaveCancelled(run.runId);
   }
 
   /**
    * A dispatch that failed before the bot was out, while this manager still holds the job: the room goes, then the run
-   * ends (no capacity, a cancel that landed meanwhile, or the retry window past its due time) or its job is released to
-   * be tried again after the pause.
+   * ends (a refusal for good, a cancel that landed meanwhile, or the retry window past its due time) or its job is
+   * released to be tried again after the pause.
    */
   private async dispatchFailed(run: MeetingRunRecord, err: unknown, roomName: string | undefined): Promise<void> {
     const job = await this.stores.jobs.get(run.runId);
     if (!job || job.leaseHolder !== this.id) return;
     if (roomName) await this.config.room.delete(roomName);
-    if (err instanceof NoCapacityError || this.now() - run.joinAt > this.dispatchRetryMs) {
+    if (err instanceof DispatchRefusedError || this.now() - run.joinAt > this.dispatchRetryMs) {
       const current = await this.stores.runs.get(run.runId);
-      if (current) await this.fail(current, job.cancelled ? current.reason ?? 'stopped_by_owner' : err instanceof NoCapacityError ? 'no_capacity' : 'crashed');
+      if (!current) return;
+      // a cancel that landed during the call ends the run as the cancel asked; a refusal ends it with the provider's reason and its word; a fault that outlasted the window ends it crashed
+      if (job.cancelled) await this.fail(current, current.reason ?? 'stopped_by_owner');
+      else if (err instanceof DispatchRefusedError) await this.fail(current, err.reason, err.message);
+      else await this.fail(current, 'crashed');
       return;
     }
     // Keep dispatching: the forward-only graph allows retrying the same state.
@@ -638,6 +675,80 @@ export class MeetingManager {
 
   private async apply(event: NormalizedMeetingEvent): Promise<boolean> {
     const run = await this.stores.runs.get(event.runId);
+    // what the supplier measured is cost already incurred: recorded before the terminal, fence and dedup guards, so a
+    // terminal report still settles it without admitting content (the hook keeps the largest totals, so a repeat is safe).
+    // A record the hook refuses holds back nothing of the report: a left or a crash still ends the run below
+    const refused = run?.reservationId && event.data?.supplierUsage !== undefined
+      ? await this.recordSupplierTotals(run.runId, run.reservationId, event.data.supplierUsage)
+      : undefined;
+    const applied = await this.applyReport(run, event);
+    if (refused) throw refused.error;
+    return applied;
+  }
+
+  /**
+   * Hands what a run's supplier measured to the entitlement hook's `recordSupplierUsage`, when the hook has one. Totals
+   * the hook refuses wait in the stores' `supplierUsageInbox`, when there is one, until a reconcile hands them over
+   * again; with no inbox, or one that refuses them too, the hook's error is answered, for the caller to throw once its
+   * own work is done.
+   */
+  private async recordSupplierTotals(runId: string, reservationId: string, usage: SupplierUsage): Promise<{ error: unknown } | undefined> {
+    try {
+      await this.stores.entitlement.recordSupplierUsage?.(reservationId, usage);
+      return undefined;
+    } catch (error) {
+      const inbox = this.stores.supplierUsageInbox;
+      if (!inbox) {
+        this.config.logger?.warn(`[MeetingManager] supplier usage of ${runId} not recorded: ${String(error)}`);
+        return { error };
+      }
+      try {
+        // the id names the run and the totals, so the same totals refused twice wait once
+        await inbox.accept({ id: `${runId}:${usage.streamSeconds}:${usage.captureSeconds}:${usage.final === true ? 'final' : 'running'}`, acceptedAt: this.now(), value: { runId, reservationId, usage } });
+      } catch (keepError) {
+        this.config.logger?.error(`[MeetingManager] supplier usage of ${runId} neither recorded (${String(error)}) nor kept (${String(keepError)})`);
+        return { error };
+      }
+      this.config.logger?.warn(`[MeetingManager] supplier usage of ${runId} not recorded, kept for the next reconcile: ${String(error)}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * Hands the entitlement hook again the supplier totals it refused before, kept in the stores' `supplierUsageInbox`:
+   * each one recorded is acknowledged, and one refused again stays for the next reconcile.
+   * An entry recorded but not acknowledged holds back no other, and the first such failure is thrown once the pass
+   * is done, for reconcile to throw at the end of its own work.
+   */
+  private async recordKeptSupplierUsage(): Promise<void> {
+    const inbox = this.stores.supplierUsageInbox;
+    if (!inbox || !this.stores.entitlement.recordSupplierUsage) return;
+    const kept = await inbox.pending();
+    let refused = 0;
+    let firstError: unknown;
+    let unacknowledged: { error: unknown } | undefined;
+    for (const entry of kept) {
+      try {
+        await this.stores.entitlement.recordSupplierUsage?.(entry.value.reservationId, entry.value.usage);
+      } catch (error) {
+        if (refused === 0) firstError = error;
+        refused += 1;
+        continue;
+      }
+      try {
+        await inbox.acknowledge(entry.id);
+      } catch (error) {
+        // recorded all the same: the entry stays pending, and the hook, which keeps the largest of each, sees the totals again
+        unacknowledged ??= { error };
+      }
+    }
+    // one line for the pass, however many the hook refused
+    if (refused > 0) this.config.logger?.warn(`[MeetingManager] ${refused} of ${kept.length} kept supplier usage totals refused again, kept for the next reconcile: ${String(firstError)}`);
+    if (unacknowledged) throw unacknowledged.error;
+  }
+
+  /** The report applied to its run as `apply` read it, whatever became of the report's supplier totals. */
+  private async applyReport(run: MeetingRunRecord | undefined, event: NormalizedMeetingEvent): Promise<boolean> {
     if (!run || TERMINAL_RUN_STATES.has(run.state)) return false;
     const fenced = run.state === 'purging';
     // behind the fence nothing a person said or did is stored or forwarded: a late content report is dropped whole
@@ -734,7 +845,7 @@ export class MeetingManager {
           return true;
         }
         // a bot that left on its own (not admitted, alone, the cap, a crash before a command) reaches `left` from any state after dispatch, with its own reason
-        const left = await this.move(run, 'left', { leftAt: event.at, reason, reportedSeconds: event.data?.seconds ?? run.reportedSeconds, cleanupPending: true }, 'bot:left', { reason }, event);
+        const left = await this.move(run, 'left', { leftAt: event.at, reason, reportedSeconds: event.data?.seconds ?? run.reportedSeconds, cleanupPending: true }, 'bot:left', event.data?.message === undefined ? { reason } : { reason, message: event.data.message }, event);
         if (left) await this.complete(left, event.data?.seconds);
         return true;
       }
@@ -1273,14 +1384,22 @@ export class MeetingManager {
 
   /**
    * Compares dispatched jobs with the providers' usage: a run whose container is gone is ended as crashed; an unfinished
-   * purge is resumed. A run still waiting for its dispatch whose job is missing (a send whose job could not be stored)
-   * is given its job again, and one a cancel left without its job (the cancel's reason is on the run) is ended, so
-   * neither waits for ever holding its reservation. As in the limits, a run whose step throws holds back no other, and
-   * the first error is thrown at the end.
+   * purge is resumed; what a provider's supplier measured for a run is recorded through the entitlement hook's
+   * `recordSupplierUsage`, when the hook has one. First, the supplier totals the hook refused before, kept in the stores'
+   * `supplierUsageInbox`, are handed to it again. An answer about a run the provider was not asked about is ignored and
+   * logged. A run still waiting for its dispatch whose job is missing (a send whose job could not be stored) is given its
+   * job again, and one a cancel left without its job (the cancel's reason is on the run) is ended, so neither waits for
+   * ever holding its reservation. As in the limits, a run whose step throws holds back no other, and the first error is
+   * thrown at the end.
    */
   async reconcile(): Promise<void> {
     const now = this.now();
     let failure: { error: unknown } | undefined;
+    try {
+      await this.recordKeptSupplierUsage();
+    } catch (error) {
+      failure ??= { error };
+    }
     const byProvider = new Map<string, string[]>();
     for (const job of await this.stores.jobs.listDispatched()) {
       try {
@@ -1311,7 +1430,28 @@ export class MeetingManager {
         this.config.logger?.warn(`[MeetingManager] usage of ${providerName} unavailable: ${String(err)}`);
         continue;
       }
-      for (const u of usage) {
+      // only the runs this pass asked about: an answer about another run (another provider's, or one not polled) is not
+      // the provider's to give, so neither its supplier totals nor its end are taken from it
+      const asked = new Set(runIds);
+      const answered = usage.filter((u) => asked.has(u.runId));
+      if (answered.length < usage.length) {
+        this.config.logger?.warn(`[MeetingManager] usage of ${providerName}: ${usage.length - answered.length} answer(s) about runs it was not asked about, ignored`);
+      }
+      for (const u of answered) {
+        if (u.supplierUsage !== undefined) {
+          // in a try of its own: a record that throws holds back neither this run's crash check nor any other run's. Totals
+          // the hook refuses wait in the supplier usage inbox, so the crash below, whose cleanup removes the run's job and
+          // with it the run from every later pass, loses none of them
+          try {
+            const supplierRun = await this.stores.runs.get(u.runId);
+            if (supplierRun?.reservationId !== undefined) {
+              const refused = await this.recordSupplierTotals(u.runId, supplierRun.reservationId, u.supplierUsage);
+              if (refused) failure ??= refused;
+            }
+          } catch (error) {
+            failure ??= { error };
+          }
+        }
         if (u.alive) continue;
         try {
           const run = await this.stores.runs.get(u.runId);
