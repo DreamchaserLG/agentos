@@ -1,3 +1,13 @@
+## [0.13.107](https://github.com/framerslab/agentos/compare/v0.13.106...v0.13.107) (2026-10-13)
+
+### feat
+
+* **voice-pipeline:** scoped call runtime seams (#421) ([c85e884](https://github.com/framerslab/agentos/commit/c85e88432b38f9e8d58ec7b7a83cfdad44e0209c))
+
+### test
+
+* **meetings:** pin the kill deadline a later pass arms for a leave or a purge written without one, and the stamp of lastReportAt (#433) ([f78495f](https://github.com/framerslab/agentos/commit/f78495fea636e9ff0810d08ab144a32adb1d8f97))
+
 ## [0.13.106](https://github.com/framerslab/agentos/compare/v0.13.105...v0.13.106) (2026-10-13)
 
 ### fix
