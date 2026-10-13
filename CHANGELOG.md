@@ -1,3 +1,9 @@
+## [0.13.106](https://github.com/framerslab/agentos/compare/v0.13.105...v0.13.106) (2026-10-13)
+
+### fix
+
+* **meetings:** a fenced outbox sends outside its run's guard, so an enqueue and a participant's stop never wait for a destination (#432) ([e1eb4da](https://github.com/framerslab/agentos/commit/e1eb4dacdc5b590d74830be57d971d88d74a1921))
+
 ## [0.13.105](https://github.com/framerslab/agentos/compare/v0.13.104...v0.13.105) (2026-10-13)
 
 ### feat
