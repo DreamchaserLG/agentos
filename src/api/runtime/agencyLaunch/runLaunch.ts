@@ -557,7 +557,14 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
   } finally {
     clearTimeout(timer);
     parent.signal?.removeEventListener('abort', onParentStop);
-    launchRegistry.remove(entry.launchId);
+    // The entry goes once every seat is released. Until then it stays, closing: it admits nothing under it and
+    // counts toward its scope's maxConcurrent, so retries against a tool that hangs past the deadline are refused
+    // instead of piling up seats (spec R6).
+    if (holding.size === 0) launchRegistry.remove(entry.launchId);
+    else {
+      launchRegistry.markClosing(entry.launchId);
+      void Promise.all([...holding]).then(() => launchRegistry.remove(entry.launchId));
+    }
   }
   return finish(launch, built, outcome, settled ?? { ...state });
 }
