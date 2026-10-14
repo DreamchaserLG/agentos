@@ -1,3 +1,13 @@
+## [0.13.116](https://github.com/framerslab/agentos/compare/v0.13.115...v0.13.116) (2026-10-14)
+
+### feat
+
+* **voice-platform:** authenticated reconnecting call transports (#439) ([0e87a3e](https://github.com/framerslab/agentos/commit/0e87a3e898e195197d8ef8b1b4d19ca473b0907b))
+
+### fix
+
+* **voice-pipeline:** clear client line timers on stop and finish a Moonshine session's close when a listener throws (#444) ([124c1ab](https://github.com/framerslab/agentos/commit/124c1ab8a4f985576327dc7c021a3c970d74dba8))
+
 ## [0.13.115](https://github.com/framerslab/agentos/compare/v0.13.114...v0.13.115) (2026-10-14)
 
 ### fix
