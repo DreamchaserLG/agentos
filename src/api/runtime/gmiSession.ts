@@ -33,6 +33,8 @@ import { DEFAULT_MEMORY_TOKEN_BUDGET, MEMORY_TIMEOUT_MS } from './memoryProvider
 import type { AgentOSUsageLedgerOptions } from './usageLedger.js';
 import type { LateAttemptUsage } from './completionGateway.js';
 import { costOfUsageUSD, type SpendBudget } from './spendBudget.js';
+import type { ApprovalGateFn } from './approval-gate.js';
+import type { ToolCallHook } from './agencyLaunch/types.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 
@@ -68,6 +70,12 @@ export interface GmiTurnOptions {
    * finished step, each billed failed attempt and each late usage report into it.
    */
   budget?: SpendBudget;
+  /** The approval gate the turn's tool calls are asked (agency()'s, or the one a launch carries). */
+  approvalGate?: ApprovalGateFn;
+  /** A seat's tool names: the only tools the turn lists and runs. */
+  toolNames?: ReadonlySet<string>;
+  /** The launching turn's onBeforeToolExecution hooks, run before the agent's own. */
+  toolHooks?: readonly ToolCallHook[];
   /**
    * Checks the reply of a turn that ended without error, before the session
    * keeps it. A throw keeps nothing of the turn (no history, no
@@ -95,6 +103,14 @@ export interface GmiTurnContext {
   onLateUsage?: (report: LateAttemptUsage) => void;
   /** The turn's spend budget ({@link GmiTurnOptions.budget}), for the GMI's gateway and provider manager. */
   budget?: SpendBudget;
+  /** The turn's approval gate ({@link GmiTurnOptions.approvalGate}). */
+  approvalGate?: ApprovalGateFn;
+  /** A seat's tool names ({@link GmiTurnOptions.toolNames}). */
+  toolNames?: ReadonlySet<string>;
+  /** The carried hooks ({@link GmiTurnOptions.toolHooks}). */
+  toolHooks?: readonly ToolCallHook[];
+  /** The explicit user id the session named; undefined when it named none. */
+  providerUserId?: string;
 }
 
 /** The GMI that serves one turn. */
@@ -344,6 +360,10 @@ export async function* runGmiTurn(
       onModelCall: ({ providerId, modelId }) => folder.route(providerId, modelId),
       structured: turn.responseSchema !== undefined,
       budget: turn.budget,
+      approvalGate: turn.approvalGate,
+      toolNames: turn.toolNames,
+      toolHooks: turn.toolHooks,
+      providerUserId: deps.providerUserId,
       // The bill a provider reports for a call this turn stopped (close() during
       // the call) arrives after the turn has ended: it is metered, counted and
       // charged to the turn's budget as a failed attempt's, as a billed failure

@@ -18,7 +18,7 @@ import type { Agent, AgentOptions, AgentSession, AgentSessionOptions, SessionSen
 import { extractTextFromContent, resolveChainOfThought, type GenerateTextOptions, type GenerateTextResult, type Message, type MessageContent } from './generateText.js';
 import type { StreamTextResult } from './streamText.js';
 import { GMI } from '../cognition/substrate/GMI.js';
-import type { GMIBaseConfig, IGMI } from '../cognition/substrate/IGMI.js';
+import type { GMIBaseConfig, IGMI, ToolCallRequest, ToolCallResult } from '../cognition/substrate/IGMI.js';
 import type { IPersonaDefinition } from '../cognition/substrate/personas/IPersonaDefinition.js';
 import { InMemoryWorkingMemory } from '../cognition/substrate/memory/InMemoryWorkingMemory.js';
 import { StatisticalUtilityAI } from '../cognition/nlp/ai_utilities/StatisticalUtilityAI.js';
@@ -32,13 +32,14 @@ import type { IToolOrchestrator } from '../core/tools/IToolOrchestrator.js';
 import type { ITool } from '../core/tools/ITool.js';
 import { ExtensionRegistry } from '../extensions/ExtensionRegistry.js';
 import { EXTENSION_KIND_TOOL } from '../extensions/types.js';
-import { APPROVAL_GRANTED, askApprovalGate, type ApprovalGateFn } from './runtime/approval-gate.js';
+import { APPROVAL_GRANTED, askApprovalGate, composeReceivedGate, type ApprovalGateFn } from './runtime/approval-gate.js';
 import { runCitationVerification } from './runtime/citationVerification.js';
 import { createCompletionGateway, type CompletionAttempt, type CompletionGateway } from './runtime/completionGateway.js';
 import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
 import { asSpendBudget, assertCallWithinBudget, promptCharsOf, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
 import { adaptTools } from './runtime/toolAdapter.js';
 import { withMembers } from './runtime/withMembers.js';
+import type { CallerTurnContext, ToolCallHook } from './runtime/agencyLaunch/types.js';
 import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
 import { personaFromAgentOptions } from './runtime/gmiPersona.js';
 import { modelNamesAnotherProvider } from './runtime/credentialOwner.js';
@@ -145,54 +146,77 @@ function toolExecutorWithoutBuiltIns(): ToolExecutor {
   return executor;
 }
 
+/** A call answered without running its tool: the model is told why. */
+function skippedCall(req: ToolCallRequest, reason: string): ToolCallResult {
+  return { toolCallId: req.id, toolName: req.name, output: { skipped: true, reason }, isError: true, errorDetails: { message: `Skipped: ${reason}` } };
+}
+
 /**
- * The agent's `onBeforeToolExecution` and the call's tool-approval gate around
- * the shared orchestrator, for one GMI, as `generateText` runs them. The hook
- * runs first: `null` skips the tool, returned arguments replace the call's,
- * and a hook that throws, or resolves with no result to read arguments from,
- * is warned about and the tool runs with the arguments the model sent. The
- * gate (`agency()`'s `hitl.approvals.beforeTool`) is then asked about a tool
- * the orchestrator has, with the arguments the hook left; anything but the
- * exact approval skips the tool, and the model is told why.
+ * Every GMI's tool orchestrator: the shared one, seen through the turn that runs (read with `turnOf()`, since a
+ * session's GMI is built once and serves many turns). A seat's turn lists only its tool names and answers a call to any
+ * other with `{ skipped: true, reason: 'not available in this seat' }` before any hook runs. The hooks the turn carries
+ * (a launching turn's) run before the agent's own `onBeforeToolExecution`, outermost first: `null` from any skips the
+ * tool, returned arguments replace the call's, and a hook that throws, or resolves with no result to read arguments
+ * from, is warned about and the call goes on with the arguments it had. The turn's approval gate, else the one the GMI
+ * was built with, is then asked about a tool the orchestrator has, with the arguments the hooks left; anything but the
+ * exact approval skips the tool, and the model is told why. Every call passed on carries `callerTurn`: the gate, the
+ * budget, the explicit user, the names, the hooks (the carried ones, then the agent's) and this view's own
+ * `processToolCall`, through which the step gate runs each step of a composed tool.
  */
-function hookTools(base: IToolOrchestrator, hook: AgentOptions['onBeforeToolExecution'], step: { index: number }, gate?: ApprovalGateFn): IToolOrchestrator {
-  if (!hook && !gate) return base;
+function hookTools(
+  base: IToolOrchestrator,
+  hook: AgentOptions['onBeforeToolExecution'],
+  step: { index: number },
+  turnOf: () => GmiTurnContext,
+  buildGate?: ApprovalGateFn,
+): IToolOrchestrator {
+  const visible = <T extends { name: string }>(tools: T[]): T[] => {
+    const names = turnOf().toolNames;
+    return names ? tools.filter((tool) => names.has(tool.name)) : tools;
+  };
   const processToolCall: IToolOrchestrator['processToolCall'] = async (details) => {
+    const turn = turnOf();
     const req = details.toolCallRequest;
+    if (turn.toolNames && !turn.toolNames.has(req.name)) return skippedCall(req, 'not available in this seat');
+    const hooks: ToolCallHook[] = [...(turn.toolHooks ?? []), ...(hook ? [hook] : [])];
     let args = (req.arguments ?? {}) as Record<string, unknown>;
-    if (hook) {
+    for (const run of hooks) {
       try {
-        const hookResult = await hook({ name: req.name, args, id: req.id, step: step.index });
+        const hookResult = await run({ name: req.name, args, id: req.id, step: step.index });
         if (hookResult === null) {
-          return {
-            toolCallId: req.id,
-            toolName: req.name,
-            output: { skipped: true },
-            isError: true,
-            errorDetails: { message: 'Skipped by onBeforeToolExecution hook' },
-          };
+          return { toolCallId: req.id, toolName: req.name, output: { skipped: true }, isError: true, errorDetails: { message: 'Skipped by onBeforeToolExecution hook' } };
         }
         args = hookResult.args;
       } catch (hookError) {
         console.warn('[agentos] onBeforeToolExecution hook error:', hookError);
       }
     }
+    const gate = turn.approvalGate ?? buildGate;
     // A tool the orchestrator does not have is reported by it without asking anyone.
     if (gate && (await base.getTool(req.name))) {
       const verdict = await askApprovalGate(gate, { name: req.name, args: args ?? {}, id: req.id, step: step.index });
-      if (verdict !== APPROVAL_GRANTED) {
-        return {
-          toolCallId: req.id,
-          toolName: req.name,
-          output: { skipped: true, reason: verdict.reason },
-          isError: true,
-          errorDetails: { message: `Skipped: ${verdict.reason}` },
-        };
-      }
+      if (verdict !== APPROVAL_GRANTED) return skippedCall(req, verdict.reason);
     }
-    return base.processToolCall({ ...details, toolCallRequest: { ...req, arguments: args } });
+    const callerTurn: CallerTurnContext = {
+      ...(gate ? { approvalGate: gate } : {}),
+      ...(turn.budget ? { budget: turn.budget } : {}),
+      ...(turn.providerUserId !== undefined ? { providerUserId: turn.providerUserId } : {}),
+      ...(turn.toolNames ? { toolNames: turn.toolNames } : {}),
+      toolHooks: hooks,
+      dispatch: processToolCall,
+    };
+    return base.processToolCall({ ...details, toolCallRequest: { ...req, arguments: args }, callerTurn });
   };
-  return withMembers(base, { processToolCall });
+  return withMembers(base, {
+    processToolCall,
+    listAvailableTools: async (context?: Parameters<IToolOrchestrator['listAvailableTools']>[0]) => visible(await base.listAvailableTools(context)),
+    ...(typeof base.listDiscoveredTools === 'function'
+      ? {
+          listDiscoveredTools: async (...args: Parameters<NonNullable<IToolOrchestrator['listDiscoveredTools']>>) =>
+            visible(await base.listDiscoveredTools!(...args)),
+        }
+      : {}),
+  });
 }
 
 /**
@@ -291,6 +315,25 @@ interface SessionEntry {
 interface SeatSessionOptions extends AgentSessionOptions {
   /** The session's memory is scoped to itself and it has no learner. */
   __seat?: { memoryScope: 'session'; learner: 'none' };
+}
+
+/** The keys a seat puts on its session's sends (sessionSeat.ts), beside the public ones. */
+interface SeatSendKeys {
+  __approvalGate?: ApprovalGateFn;
+  __toolNames?: ReadonlySet<string>;
+  __toolHooks?: readonly ToolCallHook[];
+}
+
+/** The turn options a seat's send carries. */
+function seatTurnOf(sendOpts: unknown): Pick<GmiTurnOptions, 'approvalGate' | 'toolNames' | 'toolHooks'> {
+  const keys = (sendOpts ?? {}) as SeatSendKeys;
+  // A gate that is present but not a function refuses every tool, as a gate received from a parent agency does.
+  const gate = composeReceivedGate(keys.__approvalGate);
+  return {
+    ...(gate ? { approvalGate: gate } : {}),
+    ...(keys.__toolNames instanceof Set ? { toolNames: keys.__toolNames } : {}),
+    ...(Array.isArray(keys.__toolHooks) ? { toolHooks: keys.__toolHooks } : {}),
+  };
 }
 
 /** What a gmi() agent's options say about the loops its GMIs run, for the learning layer's manifest. */
@@ -458,7 +501,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       promptEngine: s.promptEngine,
       llmProviderManager: new GatewayProviderManager(() => turn.budget).asProviderManager(),
       utilityAI: s.utilityAI,
-      toolOrchestrator: hookTools(s.tools, opts.onBeforeToolExecution, step, gate),
+      toolOrchestrator: hookTools(s.tools, opts.onBeforeToolExecution, step, () => turn, gate),
       // The agent's memory as this GMI's session sees it: the shared store with a
       // working memory of its own, so one session's active context never lists
       // another's memories. `GMI.shutdown()` shuts down the memory it was given;
@@ -629,10 +672,14 @@ export function gmi(opts: GmiOptions): GmiHandle {
     };
   }
 
-  /** What a generate() or stream() call hands its turn: its stop, and its budget (a new one from settings) or the agent's. */
-  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'budget'> => {
+  /** What a generate() or stream() call hands its turn: its stop, its budget (a new one from settings) or the agent's, and its gate. */
+  const callTurn = (extra?: Partial<GenerateTextOptions>): Pick<GmiTurnOptions, 'abortSignal' | 'budget' | 'approvalGate'> => {
     const budget = asSpendBudget(extra?.budget) ?? agentBudget;
-    return { ...(extra?.abortSignal ? { abortSignal: extra.abortSignal } : {}), ...(budget ? { budget } : {}) };
+    return {
+      ...(extra?.abortSignal ? { abortSignal: extra.abortSignal } : {}),
+      ...(budget ? { budget } : {}),
+      ...(extra?.__approvalGate ? { approvalGate: extra.__approvalGate } : {}),
+    };
   };
 
   const handle: Agent = {
@@ -789,6 +836,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
               abortSignal: turnSignal(callerSignal),
               // The turn's budget: the send's own (a new one from settings) in place of the agent's.
               budget: asSpendBudget(sendOpts?.budget) ?? agentBudget,
+              ...seatTurnOf(sendOpts),
             });
           } catch (error) {
             // Once the caller's signal has aborted, the send rejects with its
@@ -798,8 +846,13 @@ export function gmi(opts: GmiOptions): GmiHandle {
             throw error;
           }
         },
+        // As in send(), the turn takes the caller's budget and the gate, tool names and hooks a seat puts on its calls.
         stream: (input: MessageContent, streamOpts?: { abortSignal?: AbortSignal; budget?: SpendBudget | SpendBudgetOptions }) =>
-          streamGmiTurn(deps('agent.session.stream'), input, { abortSignal: turnSignal(streamOpts?.abortSignal), budget: asSpendBudget(streamOpts?.budget) ?? agentBudget }),
+          streamGmiTurn(deps('agent.session.stream'), input, {
+            abortSignal: turnSignal(streamOpts?.abortSignal),
+            budget: asSpendBudget(streamOpts?.budget) ?? agentBudget,
+            ...seatTurnOf(streamOpts),
+          }),
         messages: (): SessionTranscriptMessage[] => history?.messages() ?? [],
         reseed: (snapshot: SessionTranscriptMessage[]) => {
           if (!history) throw new Error('reseed requires session history (history: false is set on this agent)');
