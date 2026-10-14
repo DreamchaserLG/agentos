@@ -286,6 +286,36 @@ async function closeAll(seats: SeatHandle[], host: LaunchHost): Promise<void> {
   await Promise.all(seats.map((seat) => seat.close().catch((error: unknown) => logSafely(host, error, 'launch_agency close'))));
 }
 
+/** Resolves when `signal` aborts. */
+function whenAborted(signal: AbortSignal): Promise<{ kind: 'aborted' }> {
+  return new Promise((resolve) => {
+    if (signal.aborted) resolve({ kind: 'aborted' });
+    else signal.addEventListener('abort', () => resolve({ kind: 'aborted' }), { once: true });
+  });
+}
+
+/** `work`'s value, or `aborted` when `signal` aborts first. */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<{ kind: 'value'; value: T } | { kind: 'aborted' }> {
+  return Promise.race([work.then((value) => ({ kind: 'value' as const, value })), whenAborted(signal)]);
+}
+
+/** Whether `work` settles within `ms` (with its value), or not; a rejection counts as settled. */
+function within<T>(work: Promise<T>, ms: number): Promise<{ settled: true; value: T } | { settled: false }> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ settled: false }), Math.max(0, ms));
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve({ settled: true, value });
+      },
+      () => {
+        clearTimeout(timer);
+        resolve({ settled: true, value: undefined as T });
+      },
+    );
+  });
+}
+
 function recordMeta(launch: AdmittedLaunch, status: LaunchRecordMetadata['status']): LaunchRecordMetadata {
   return {
     kind: 'launched',
@@ -429,47 +459,107 @@ function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome
 }
 
 /**
- * Steps 6 to 10, without a deadline. The seats are built in order, the team runs the goal
- * once, the team is closed, and the entry goes.
+ * Steps 6 to 10. One real-time timer per launch (never the learning layer's clock): at the deadline, or when the
+ * parent turn stops, the launch signal aborts, which every seat's turn and the coordinator's calls run under. The
+ * launch then waits one grace for the run to settle and the team to close, together, and returns; a run that resolved
+ * before any abort gets the whole grace for its close.
  */
 async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<LaunchAgencyResult>> {
-  const { host, parent, entry } = launch;
+  const { host, parent, entry, controller, state } = launch;
+  const graceMs = host.settleGraceMs ?? LAUNCH_SETTLE_GRACE_MS;
+  // Everything that still holds a seat: the run, the close, a seat build that settles late.
+  const holding = new Set<Promise<void>>();
+  const hold = (work: Promise<unknown>): Promise<void> => {
+    const settled = work.then(() => undefined, () => undefined);
+    holding.add(settled);
+    return settled.then(() => {
+      holding.delete(settled);
+    });
+  };
+  const timer = setTimeout(() => {
+    state.timedOut = true;
+    controller.abort(Object.assign(new Error(`the launch's deadline of ${launch.deadlineMs} ms passed`), { name: 'LaunchDeadlineError' }));
+  }, launch.deadlineMs);
+  const onParentStop = (): void => {
+    state.cancelled = true;
+    controller.abort(parent.signal?.reason);
+  };
+  if (parent.signal?.aborted) onParentStop();
+  else parent.signal?.addEventListener('abort', onParentStop, { once: true });
+
   const built: SeatHandle[] = [];
   let team: Agent | undefined;
   let outcome: RunOutcome = { kind: 'not_run' };
+  let settled: LaunchState | undefined;
   try {
+    // 6. Seats, each racing the launch's signal (a runtime seat's GMI can take long to start).
     for (const seat of launch.seats) entry.seatTools.set(seat.role, seat.toolNames);
-    const cutWhen = (): boolean => launch.state.exhausted || launch.controller.signal.aborted;
+    const cutWhen = (): boolean => state.exhausted || controller.signal.aborted;
     for (const seat of launch.seats) {
-      const made = await host.buildSeat(seat, entry, parent, frameFor(entry, seat.role), cutWhen);
-      if (isRefusal(made)) {
-        await closeAll(built, host);
-        return refused(made);
+      if (controller.signal.aborted) break;
+      const building = host.buildSeat(seat, entry, parent, frameFor(entry, seat.role), cutWhen);
+      const raced = await untilAborted(building, controller.signal);
+      if (raced.kind === 'aborted') {
+        // A seat whose build settles after the abort is released at once.
+        void hold(building.then((late) => (isRefusal(late) ? undefined : late.close())));
+        break;
       }
-      built.push(made);
+      if (isRefusal(raced.value)) {
+        void hold(closeAll(built, host));
+        return refused(raced.value);
+      }
+      built.push(raced.value);
     }
-    try {
-      team = agency(await childAgencyOptions(launch, built));
-    } catch (error) {
-      if (!(error instanceof AgencyConfigError)) throw error;
-      await closeAll(built, host);
-      return refused({ code: 'invalid_arguments', reason: error.message });
+
+    // The child's route races the launch's signal as the seat builds do.
+    const options = controller.signal.aborted ? ({ kind: 'aborted' } as const) : await untilAborted(childAgencyOptions(launch, built), controller.signal);
+    if (options.kind === 'aborted') {
+      // The deadline or the parent's stop came while the team was built: nothing runs.
+      settled = { ...state };
+      await within(hold(closeAll(built, host)), graceMs);
+    } else {
+      // 7. Run.
+      try {
+        team = agency(options.value);
+      } catch (error) {
+        if (!(error instanceof AgencyConfigError)) throw error;
+        void hold(closeAll(built, host));
+        return refused({ code: 'invalid_arguments', reason: error.message });
+      }
+      // The record starts once the child is built, so a configuration agency() refuses leaves no record behind.
+      recordStart(launch, built);
+      const run = runTeam(launch, team);
+      void hold(run);
+      // 8. Settle: the run, or the abort and then one grace for the run and the close together.
+      const first = await Promise.race([run, whenAborted(controller.signal)]);
+      let graceEnds: number;
+      if (first.kind === 'aborted') {
+        graceEnds = Date.now() + graceMs;
+        const late = await within(run, graceMs);
+        outcome = late.settled ? late.value : { kind: 'unsettled' };
+      } else {
+        clearTimeout(timer);
+        outcome = first;
+        graceEnds = Date.now() + graceMs;
+      }
+      settled = { ...state };
+      if (outcome.kind === 'rejected') logSafely(host, outcome.error, 'launch_agency run');
+      // 9. Close: every seat once, every close attempted (spec D20). Not team.close(): agency().close() stops at the
+      // first member that rejects, which would free the scope with later seats open.
+      const closing = hold(closeAll(built, host));
+      await within(closing, graceEnds - Date.now());
     }
-    // The record starts once the child is built, so a configuration agency() refuses leaves no record behind.
-    recordStart(launch, built);
-    outcome = await runTeam(launch, team);
-    if (outcome.kind === 'rejected') logSafely(host, outcome.error, 'launch_agency run');
-    // The engine closes the seats itself, each once, every close attempted: agency().close() awaits its members in turn
-    // and stops at the first that rejects, and the child holds nothing else a launch opened.
-    await closeAll(built, host);
   } catch (error) {
     logSafely(host, error, 'launch_agency');
     outcome = { kind: 'rejected', error };
-    await closeAll(built, host);
+    settled = { ...state };
+    void hold(closeAll(built, host));
   } finally {
+    clearTimeout(timer);
+    parent.signal?.removeEventListener('abort', onParentStop);
     launchRegistry.remove(entry.launchId);
   }
-  return finish(launch, built, outcome);
+  return finish(launch, built, outcome, settled ?? { ...state });
 }
 
 /**
