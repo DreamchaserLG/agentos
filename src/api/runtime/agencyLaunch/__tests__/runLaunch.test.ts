@@ -418,6 +418,33 @@ describe('runLaunch: the run and its result', () => {
     expect(failing.closed).toBe(true);
     await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
   });
+
+  it('a run that rejects while a seat still runs stops that seat: the launch signal aborts once the run has settled', async () => {
+    const signals: AbortSignal[] = [];
+    const failing = fakeSeat('a', async () => {
+      throw Object.assign(new Error('upstream failed'), { name: 'ProviderError' });
+    });
+    // Runs until its call's signal aborts, as a seat's turn does.
+    const running = fakeSeat('b', (_input, opts) =>
+      new Promise<string>((_resolve, reject) => {
+        const signal = opts?.abortSignal as AbortSignal;
+        signals.push(signal);
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      }),
+    );
+    const seats: Record<string, FakeSeat> = { a: failing, b: running };
+    const host = fakeHost({ seat: (s) => seats[s.role] });
+    // A graph tier runs its seats together and rejects at the first that fails, while the others go on.
+    const out = (await runLaunch(host, args({ strategy: 'graph', seats: [seat('a'), seat('b')] }), ctxFor())).output as LaunchAgencyResult;
+    expect(out.status).toBe('failed');
+    expect(out.reason).toBe("seat 'a' failed: ProviderError");
+    // The second seat was running when the run failed (the precondition); the launch stopped its call.
+    expect(running.inputs).toHaveLength(1);
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(true);
+    expect(out.seats.map((r) => [r.role, r.status])).toEqual([['a', 'failed'], ['b', 'cut']]);
+    await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
+  });
 });
 
 /** A seat that answers only when its call's signal aborts, and then rejects with the signal's reason. */
