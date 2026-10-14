@@ -481,3 +481,32 @@ describe("runLaunch: the deadline and the parent's stop", () => {
     expect(made[0].closed).toBe(true);
   }, 10_000);
 });
+
+describe('runLaunch: the grace and the closing entry', () => {
+  it('a run that settles late in the grace and a close that hangs return within one grace; the entry stays closing until the seats are released', async () => {
+    let releaseClose!: () => void;
+    const hangingClose = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    // Answers 100 ms after the abort, inside the 200 ms grace; its close hangs until released.
+    const late = fakeSeat(
+      'late',
+      (_input, opts) =>
+        new Promise<string>((resolve) => {
+          (opts?.abortSignal as AbortSignal).addEventListener('abort', () => setTimeout(() => resolve('Late answer.'), 100), { once: true });
+        }),
+      () => hangingClose,
+    );
+    const host = fakeHost({ seat: () => late });
+    const started = Date.now();
+    const out = (await runLaunch(host, args({ deadlineMs: 1_000 }), ctxFor())).output as LaunchAgencyResult;
+    // One grace for the settle and the close together.
+    expect(Date.now() - started).toBeLessThan(1_000 + 200 + 300);
+    expect(out).toMatchObject({ status: 'timed_out', text: 'Late answer.' });
+    expect(launchRegistry.get(out.agencyId)?.state).toBe('closing');
+    // A closing launch counts toward its scope: the next launch from the same session waits for the release.
+    expect((await refusalOf(host, args())).code).toBe('concurrency_exceeded');
+    releaseClose();
+    await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
+  }, 10_000);
+});
