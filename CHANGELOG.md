@@ -1,3 +1,9 @@
+## [0.13.133](https://github.com/framerslab/agentos/compare/v0.13.132...v0.13.133) (2026-10-14)
+
+### fix
+
+* **voice-platform:** voice transport review fixes (#476) ([52204c5](https://github.com/framerslab/agentos/commit/52204c5271f1c8378b82d4c94a11ff3cc2060a86))
+
 ## [0.13.132](https://github.com/framerslab/agentos/compare/v0.13.131...v0.13.132) (2026-10-14)
 
 ### fix
