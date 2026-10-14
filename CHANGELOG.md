@@ -1,3 +1,9 @@
+## [0.13.119](https://github.com/framerslab/agentos/compare/v0.13.118...v0.13.119) (2026-10-14)
+
+### fix
+
+* **runtime:** a tool-result continuation pauses only on external calls that still need a result (#452) ([d044361](https://github.com/framerslab/agentos/commit/d0443614cf57661ae7f40f5f086fd3b6c213439b))
+
 ## [0.13.118](https://github.com/framerslab/agentos/compare/v0.13.117...v0.13.118) (2026-10-14)
 
 ### feat
