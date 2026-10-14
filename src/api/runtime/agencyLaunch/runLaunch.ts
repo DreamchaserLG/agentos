@@ -8,7 +8,8 @@
  */
 import { IDENTIFIER_PATTERN } from '../../../cognition/emergent/ToolName.js';
 import type { AgencyStrategy } from '../../types.js';
-import { MAX_ROLE_CHARS, type LaunchAgencyArgs, type LaunchRefusal } from './types.js';
+import type { SpendBudget } from '../spendBudget.js';
+import { MAX_ROLE_CHARS, MIN_LAUNCH_TOKENS, type LaunchAgencyArgs, type LaunchLimits, type LaunchRefusal } from './types.js';
 
 /** The six strategies a launch offers (spec D17). */
 const STRATEGIES: readonly AgencyStrategy[] = ['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph'];
@@ -101,4 +102,40 @@ export function validateLaunchArgs(args: LaunchAgencyArgs): LaunchRefusal | unde
   if (args.budgetUsd !== undefined && !(Number.isFinite(args.budgetUsd) && args.budgetUsd > 0)) return invalid('budgetUsd must be above 0');
   if (args.maxTokens !== undefined && !(Number.isFinite(args.maxTokens) && args.maxTokens > 0)) return invalid('maxTokens must be above 0');
   return undefined;
+}
+
+/**
+ * Step 4: the child budget's caps (spec D9). Dollars: the least of `budgetUsd`, the parent's remaining dollars times
+ * `budgetShare` and, at a root launch, what the turn's launch pool has left (Infinity when none of them caps). Tokens:
+ * the least of `maxTokens`, the parent's remaining tokens times `budgetShare` (when it has a token cap) and the pool's
+ * remaining tokens (`limits.maxLaunchTokens` when nothing else caps them).
+ *
+ * @param outputEstimateTokens - The output tokens one call is counted with.
+ * @returns The caps, or `budget_unavailable` when the token cap cannot cover one call (`MIN_LAUNCH_TOKENS` plus the
+ *   output estimate) or no dollars are left.
+ */
+export function childBudgetCaps(
+  parent: SpendBudget | undefined,
+  pool: SpendBudget | undefined,
+  limits: LaunchLimits,
+  args: Pick<LaunchAgencyArgs, 'budgetUsd' | 'maxTokens'>,
+  outputEstimateTokens: number,
+): { maxCostUSD: number; maxTotalTokens: number } | LaunchRefusal {
+  const parentLeft = parent?.remaining();
+  const poolLeft = pool?.remaining();
+  let usd = Number.POSITIVE_INFINITY;
+  if (args.budgetUsd !== undefined) usd = Math.min(usd, args.budgetUsd);
+  if (parentLeft) usd = Math.min(usd, parentLeft.usd * limits.budgetShare);
+  if (poolLeft) usd = Math.min(usd, poolLeft.usd);
+  let tokens = Number.POSITIVE_INFINITY;
+  if (args.maxTokens !== undefined) tokens = Math.min(tokens, args.maxTokens);
+  if (parentLeft?.tokens !== undefined) tokens = Math.min(tokens, Math.floor(parentLeft.tokens * limits.budgetShare));
+  if (poolLeft?.tokens !== undefined) tokens = Math.min(tokens, poolLeft.tokens);
+  if (!Number.isFinite(tokens)) tokens = limits.maxLaunchTokens;
+  const floor = MIN_LAUNCH_TOKENS + outputEstimateTokens;
+  if (tokens < floor) {
+    return { code: 'budget_unavailable', reason: `the launch's token cap, ${tokens}, cannot cover one call (${floor}: ${MIN_LAUNCH_TOKENS} for the prompt and ${outputEstimateTokens} for the output)` };
+  }
+  if (!(usd > 0)) return { code: 'budget_unavailable', reason: 'the launch has no dollars left to spend' };
+  return { maxCostUSD: usd, maxTotalTokens: tokens };
 }
