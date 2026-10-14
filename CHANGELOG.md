@@ -1,3 +1,9 @@
+## [0.13.122](https://github.com/framerslab/agentos/compare/v0.13.121...v0.13.122) (2026-10-14)
+
+### feat
+
+* **claims:** claim coverage and scenario budgets (#453) ([1839bbc](https://github.com/framerslab/agentos/commit/1839bbc9663cd2719c3ba17b5d89bba7393dc92b))
+
 ## [0.13.121](https://github.com/framerslab/agentos/compare/v0.13.120...v0.13.121) (2026-10-14)
 
 ### feat
