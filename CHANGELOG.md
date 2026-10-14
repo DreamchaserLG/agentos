@@ -1,3 +1,11 @@
+## [0.13.135](https://github.com/framerslab/agentos/compare/v0.13.134...v0.13.135) (2026-10-14)
+
+### fix
+
+* **library:** store only a deletion record's opaque keys ([b4c314c](https://github.com/framerslab/agentos/commit/b4c314c6e1914e0570c834b2c046c132ab76d292))
+* **logging:** keep streamText and the approval gate content-safe ([dc33bb2](https://github.com/framerslab/agentos/commit/dc33bb24b3b70b89963fbf153bbd86531e11f2d5))
+* **rag:** refuse the root adapter as a borrowed transaction and document the view's rules ([97f00b8](https://github.com/framerslab/agentos/commit/97f00b8a6e7a6796e12b84a4f64749bb52ccdd7b))
+
 ## [0.13.134](https://github.com/framerslab/agentos/compare/v0.13.133...v0.13.134) (2026-10-14)
 
 ### feat
