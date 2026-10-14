@@ -10,19 +10,43 @@
  *
  * It runs when AGENTOS_TEST_MOONSHINE_DIR names a folder holding
  * tiny-streaming-en/ (the files of MOONSHINE_STREAMING_MODEL_FILES) and
- * two_cities_16k.wav; CI's Test & Lint job fetches them and sets it.
+ * two_cities_16k.wav; CI's Test & Lint job fetches them and sets it. On a
+ * folder that lacks one of them, or holds one empty, the test is skipped
+ * with a note naming the file, so a stale folder shows why.
  */
 
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { readFile } from 'node:fs/promises';
+import { statSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { MoonshineBrowserSTT } from '../providers/MoonshineBrowserSTT.js';
+import { MOONSHINE_STREAMING_MODEL_FILES, MoonshineBrowserSTT } from '../providers/MoonshineBrowserSTT.js';
 import type { TranscriptEvent } from '../types.js';
 
 /** The folder with the model and the clip; without it the suite is skipped. */
 const MODEL_DIR = process.env.AGENTOS_TEST_MOONSHINE_DIR ?? '';
+
+/** The model's folder inside MODEL_DIR, and the recorded clip beside it. */
+const MODEL_FOLDER = 'tiny-streaming-en';
+const CLIP = 'two_cities_16k.wav';
+
+/**
+ * The note the suite's test is skipped with on `dir`: it names the first of
+ * the model's files and the clip that the folder lacks or holds empty, so a
+ * developer whose folder is stale sees which; `undefined` when the folder
+ * holds them all.
+ */
+function skipNote(dir: string): string | undefined {
+  for (const file of [...MOONSHINE_STREAMING_MODEL_FILES.map((name) => `${MODEL_FOLDER}/${name}`), CLIP]) {
+    const stat = statSync(join(dir, file), { throwIfNoEntry: false });
+    if (stat === undefined || !stat.isFile() || stat.size === 0) {
+      return `AGENTOS_TEST_MOONSHINE_DIR=${dir} lacks ${file} (missing or empty)`;
+    }
+  }
+  return undefined;
+}
 
 /** The samples of a mono 16-bit PCM WAV file, as floats in [-1, 1], and its sample rate. */
 function readWav(bytes: Buffer): { samples: Float32Array; sampleRate: number } {
@@ -42,6 +66,25 @@ function readWav(bytes: Buffer): { samples: Float32Array; sampleRate: number } {
   }
   throw new Error('The clip has no data chunk');
 }
+
+describe("the suite's check of the folder AGENTOS_TEST_MOONSHINE_DIR names", () => {
+  it('names the first file the folder lacks or holds empty, and nothing for a whole folder', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'agentos-moonshine-'));
+    try {
+      await mkdir(join(dir, MODEL_FOLDER));
+      for (const name of MOONSHINE_STREAMING_MODEL_FILES) await writeFile(join(dir, MODEL_FOLDER, name), 'x');
+      expect(skipNote(dir)).toBe(`AGENTOS_TEST_MOONSHINE_DIR=${dir} lacks two_cities_16k.wav (missing or empty)`);
+      await writeFile(join(dir, CLIP), 'x');
+      expect(skipNote(dir)).toBeUndefined();
+      await writeFile(join(dir, MODEL_FOLDER, 'encoder.ort'), '');
+      expect(skipNote(dir)).toBe(`AGENTOS_TEST_MOONSHINE_DIR=${dir} lacks tiny-streaming-en/encoder.ort (missing or empty)`);
+      await rm(join(dir, MODEL_FOLDER, 'adapter.ort'));
+      expect(skipNote(dir)).toBe(`AGENTOS_TEST_MOONSHINE_DIR=${dir} lacks tiny-streaming-en/adapter.ort (missing or empty)`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe.skipIf(!MODEL_DIR)('MoonshineBrowserSTT on the real package, in Node', () => {
   let server: http.Server;
@@ -63,7 +106,10 @@ describe.skipIf(!MODEL_DIR)('MoonshineBrowserSTT on the real package, in Node', 
     await new Promise((resolve) => server.close(resolve));
   });
 
-  it("transcribes a clip on the calling thread: Moonshine's line ids, a line's interims and final under one id, flush and one close", async () => {
+  it("transcribes a clip on the calling thread: Moonshine's line ids, a line's interims and final under one id, flush and one close", async ({ skip }) => {
+    // A folder that lacks a file skips the test, with a note naming the file, rather than failing it.
+    const note = skipNote(MODEL_DIR);
+    if (note) skip(note);
     const stt = new MoonshineBrowserSTT({
       moonshine: () => import('@moonshine-ai/moonshine-wasm'),
       thread: 'calling',
