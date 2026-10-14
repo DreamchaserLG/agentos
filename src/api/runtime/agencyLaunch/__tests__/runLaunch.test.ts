@@ -4,8 +4,10 @@
  * surfaces' own tests run the real seats.
  */
 import { describe, expect, it } from 'vitest';
-import { validateLaunchArgs } from '../runLaunch.js';
+import { SpendBudget } from '../../spendBudget.js';
+import { childBudgetCaps, validateLaunchArgs } from '../runLaunch.js';
 import type { LaunchAgencyArgs } from '../types.js';
+import { resolveLaunchLimits } from '../types.js';
 
 const seat = (role: string, extra: Record<string, unknown> = {}) => ({ role, instructions: `Be the ${role}.`, ...extra });
 const args = (extra: Partial<LaunchAgencyArgs> & Record<string, unknown> = {}): LaunchAgencyArgs =>
@@ -53,5 +55,38 @@ describe('validateLaunchArgs', () => {
       expect(refusal?.code, String(reason)).toBe('invalid_arguments');
       expect(refusal?.reason).toMatch(reason);
     }
+  });
+});
+
+describe('childBudgetCaps', () => {
+  const limits = resolveLaunchLimits({});
+  const pool = (tokens = 200_000, usd = Number.POSITIVE_INFINITY) => new SpendBudget({ maxCostUSD: usd, maxTotalTokens: tokens, unpriced: 'allow' });
+
+  it("takes the parent's remaining times the share, the pool and the arguments, the least of each", () => {
+    const parent = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 20_000, unpriced: 'allow' });
+    parent.record(0.2, 6_000, 'step');
+    expect(childBudgetCaps(parent, pool(), limits, {}, 2_000)).toEqual({ maxCostUSD: 0.4, maxTotalTokens: 7_000 });
+    expect(childBudgetCaps(parent, pool(5_000, 0.1), limits, {}, 2_000)).toEqual({ maxCostUSD: 0.1, maxTotalTokens: 5_000 });
+    expect(childBudgetCaps(parent, pool(), limits, { budgetUsd: 0.05, maxTokens: 4_500 }, 2_000)).toEqual({ maxCostUSD: 0.05, maxTotalTokens: 4_500 });
+  });
+
+  it('a parent with no token cap, or no budget at all, leaves the pool to bound the tokens', () => {
+    const noTokenCap = new SpendBudget({ maxCostUSD: 1, unpriced: 'allow' });
+    expect(childBudgetCaps(noTokenCap, pool(3_000), limits, {}, 1_000)).toEqual({ maxCostUSD: 0.5, maxTotalTokens: 3_000 });
+    expect(childBudgetCaps(undefined, pool(3_000), limits, {}, 1_000)).toEqual({ maxCostUSD: Number.POSITIVE_INFINITY, maxTotalTokens: 3_000 });
+  });
+
+  it("an unpriced parent's spend counts tokens and no dollars", () => {
+    const parent = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 10_000, unpriced: 'allow' });
+    parent.record(undefined, 4_000, 'step');
+    expect(childBudgetCaps(parent, pool(), limits, {}, 1_000)).toEqual({ maxCostUSD: 0.5, maxTotalTokens: 3_000 });
+  });
+
+  it('refuses a cap that cannot cover one call, and a spent parent', () => {
+    expect(childBudgetCaps(undefined, pool(2_500), limits, {}, 1_000)).toMatchObject({ code: 'budget_unavailable' });
+    expect(childBudgetCaps(undefined, pool(3_000), limits, {}, 1_000)).toEqual({ maxCostUSD: Number.POSITIVE_INFINITY, maxTotalTokens: 3_000 });
+    const spent = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 10_000, unpriced: 'allow' });
+    spent.record(1, 1_000, 'step');
+    expect(childBudgetCaps(spent, pool(), limits, {}, 1_000)).toMatchObject({ code: 'budget_unavailable', reason: expect.stringContaining('dollars') });
   });
 });
