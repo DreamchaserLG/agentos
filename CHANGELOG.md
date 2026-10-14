@@ -1,3 +1,13 @@
+## [0.13.126](https://github.com/framerslab/agentos/compare/v0.13.125...v0.13.126) (2026-10-14)
+
+### fix
+
+* **claims:** reconcile browser test reports strictly and keep coverage keys exact (#460) ([4c0fd58](https://github.com/framerslab/agentos/commit/4c0fd587ae064e12556edbdc88ee6a043a1d45bc))
+
+### feat
+
+* **library:** persist source derivations with deletion fences ([1f5fdba](https://github.com/framerslab/agentos/commit/1f5fdbae70341340e3fcf4f1867e32d0cdeb04a5))
+
 ## [0.13.125](https://github.com/framerslab/agentos/compare/v0.13.124...v0.13.125) (2026-10-14)
 
 ### feat
