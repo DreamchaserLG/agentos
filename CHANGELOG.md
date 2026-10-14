@@ -1,3 +1,9 @@
+## [0.13.124](https://github.com/framerslab/agentos/compare/v0.13.123...v0.13.124) (2026-10-14)
+
+### fix
+
+* **voice-platform:** end calls at the turn limit, keep failures through a purge, answer stops after a server end and hash undefined members (#458) ([6f9fb12](https://github.com/framerslab/agentos/commit/6f9fb12bba542b4a5886267500b7317c949de1d5))
+
 ## [0.13.123](https://github.com/framerslab/agentos/compare/v0.13.122...v0.13.123) (2026-10-14)
 
 ### feat
