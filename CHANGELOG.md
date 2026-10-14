@@ -1,3 +1,9 @@
+## [0.13.130](https://github.com/framerslab/agentos/compare/v0.13.129...v0.13.130) (2026-10-14)
+
+### fix
+
+* **meetings:** meeting funding review fixes (#473) ([f129e4c](https://github.com/framerslab/agentos/commit/f129e4c2efa3a96e38989c593f3d1bb3224f4575))
+
 ## [0.13.129](https://github.com/framerslab/agentos/compare/v0.13.128...v0.13.129) (2026-10-14)
 
 ### fix
