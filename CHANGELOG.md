@@ -1,3 +1,9 @@
+## [0.13.120](https://github.com/framerslab/agentos/compare/v0.13.119...v0.13.120) (2026-10-14)
+
+### feat
+
+* **meetings:** publish installed capability and funding contracts (#450) ([ad243cc](https://github.com/framerslab/agentos/commit/ad243cc13b515f8269c40e72d602a39557a1456f))
+
 ## [0.13.119](https://github.com/framerslab/agentos/compare/v0.13.118...v0.13.119) (2026-10-14)
 
 ### fix
