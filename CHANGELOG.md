@@ -1,3 +1,9 @@
+## [0.13.115](https://github.com/framerslab/agentos/compare/v0.13.114...v0.13.115) (2026-10-14)
+
+### fix
+
+* **orchestration:** a parallel batch reduces each write once, and a resume asks a second approval in the batch (#445) ([8d0b8bd](https://github.com/framerslab/agentos/commit/8d0b8bd9a0ab41e6f0b800406f5dd7a87d58e347))
+
 ## [0.13.114](https://github.com/framerslab/agentos/compare/v0.13.113...v0.13.114) (2026-10-13)
 
 ### feat
