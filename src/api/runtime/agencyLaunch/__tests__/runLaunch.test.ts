@@ -419,3 +419,65 @@ describe('runLaunch: the run and its result', () => {
     await vi.waitFor(() => expect(launchRegistry.get(out.agencyId)).toBeUndefined());
   });
 });
+
+/** A seat that answers only when its call's signal aborts, and then rejects with the signal's reason. */
+const waitsForAbort = (role: string): FakeSeat =>
+  fakeSeat(role, (_input, opts) =>
+    new Promise<string>((_resolve, reject) => {
+      const signal = opts?.abortSignal as AbortSignal;
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }),
+  );
+
+describe("runLaunch: the deadline and the parent's stop", () => {
+  it('the deadline returns timed_out with what the seats produced, within the deadline and one grace', async () => {
+    const seats: Record<string, FakeSeat> = { first: fakeSeat('first', async () => 'First part.'), second: waitsForAbort('second') };
+    const host = fakeHost({ seat: (s) => seats[s.role] });
+    const started = Date.now();
+    const out = (await runLaunch(host, args({ seats: [seat('first'), seat('second')], deadlineMs: 1_000 }), ctxFor())).output as LaunchAgencyResult;
+    expect(out.status).toBe('timed_out');
+    expect(out.reason).toBe('the deadline of 1000 ms passed');
+    expect(out.seats.map((r) => r.status)).toEqual(['completed', 'cut']);
+    expect(out.seats[0].summary).toBe('First part.');
+    expect(Date.now() - started).toBeLessThan(1_000 + 200 + 500);
+  }, 10_000);
+
+  it("the parent's stop returns cancelled", async () => {
+    const parentTurn = new AbortController();
+    const host = fakeHost({ seat: (s) => waitsForAbort(s.role) });
+    const pending = runLaunch(host, args(), ctxFor({ signal: parentTurn.signal }));
+    setTimeout(() => parentTurn.abort(), 50);
+    const out = (await pending).output as LaunchAgencyResult;
+    expect(out).toMatchObject({ status: 'cancelled', reason: 'the parent turn stopped' });
+    expect(out.seats[0].status).toBe('cut');
+  }, 10_000);
+
+  it('a seat build that never settles returns at the deadline, and the seat is released when it settles', async () => {
+    let finish!: (made: SeatHandle) => void;
+    const late = fakeSeat('slow');
+    const host = fakeHost({ seat: () => new Promise<SeatHandle>((resolve) => { finish = resolve; }) });
+    const started = Date.now();
+    const out = (await runLaunch(host, args({ deadlineMs: 1_000 }), ctxFor())).output as LaunchAgencyResult;
+    expect(out.status).toBe('timed_out');
+    expect(out.seats.map((r) => r.status)).toEqual(['not_run']);
+    expect(Date.now() - started).toBeLessThan(1_000 + 500);
+    finish(late);
+    await vi.waitFor(() => expect(late.closed).toBe(true));
+  }, 10_000);
+
+  it('a team route that never settles returns at the deadline, and the seat built is released', async () => {
+    const made: FakeSeat[] = [];
+    const host = fakeHost({ seat: (s) => { const f = fakeSeat(s.role); made.push(f); return f; } });
+    // The child agency's own route never comes.
+    host.agencyRoute = () => new Promise<never>(() => undefined);
+    const started = Date.now();
+    const out = (await runLaunch(host, args({ deadlineMs: 1_000 }), ctxFor())).output as LaunchAgencyResult;
+    expect(out.status).toBe('timed_out');
+    // The seat was built (the precondition) and never called.
+    expect(made).toHaveLength(1);
+    expect(made[0].inputs).toEqual([]);
+    expect(out.seats.map((r) => r.status)).toEqual(['not_run']);
+    expect(Date.now() - started).toBeLessThan(1_000 + 500);
+    expect(made[0].closed).toBe(true);
+  }, 10_000);
+});
