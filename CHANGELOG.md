@@ -1,3 +1,9 @@
+## [0.13.121](https://github.com/framerslab/agentos/compare/v0.13.120...v0.13.121) (2026-10-14)
+
+### feat
+
+* **guardrails:** a deterministic phrase matcher over the phrase list (#454) ([46c8200](https://github.com/framerslab/agentos/commit/46c8200a21f2d5240566d654845af7e459d0d96e))
+
 ## [0.13.120](https://github.com/framerslab/agentos/compare/v0.13.119...v0.13.120) (2026-10-14)
 
 ### feat
