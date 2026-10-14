@@ -1,3 +1,14 @@
+## [0.13.118](https://github.com/framerslab/agentos/compare/v0.13.117...v0.13.118) (2026-10-14)
+
+### feat
+
+* **claims:** browser test reports as claim evidence (#449) ([ed46090](https://github.com/framerslab/agentos/commit/ed4609095b9e3fe5c45b4503ba83e85aea590736))
+
+### docs
+
+* correct the GMI paper's lines on persona traits and T4 contexts (#448) ([3fbc713](https://github.com/framerslab/agentos/commit/3fbc71321a1ddf7e0cb4f5e666981930bf2af976))
+* fix the claims the cold read of #377 found in its files (#447) ([798ffa2](https://github.com/framerslab/agentos/commit/798ffa23bfc8d015f145b522f00d8ce9c5ef3a2b))
+
 ## [0.13.117](https://github.com/framerslab/agentos/compare/v0.13.116...v0.13.117) (2026-10-14)
 
 ### feat
