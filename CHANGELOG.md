@@ -1,3 +1,9 @@
+## [0.13.134](https://github.com/framerslab/agentos/compare/v0.13.133...v0.13.134) (2026-10-14)
+
+### feat
+
+* **claims:** capture and fixture evidence, the capture-driver protocol and history-only captures (#469) ([335dd36](https://github.com/framerslab/agentos/commit/335dd365b2550dbe4af9fba37783395d5523ce1a))
+
 ## [0.13.133](https://github.com/framerslab/agentos/compare/v0.13.132...v0.13.133) (2026-10-14)
 
 ### fix
