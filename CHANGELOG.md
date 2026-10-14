@@ -1,3 +1,9 @@
+## [0.13.123](https://github.com/framerslab/agentos/compare/v0.13.122...v0.13.123) (2026-10-14)
+
+### feat
+
+* **library:** enforce personal source derivation policy (#456) ([8b62e96](https://github.com/framerslab/agentos/commit/8b62e969f569a872496cffe4de564588c90536c5))
+
 ## [0.13.122](https://github.com/framerslab/agentos/compare/v0.13.121...v0.13.122) (2026-10-14)
 
 ### feat
