@@ -1,3 +1,10 @@
+## [0.13.128](https://github.com/framerslab/agentos/compare/v0.13.127...v0.13.128) (2026-10-14)
+
+### feat
+
+* **claims:** catalog dependency manifests per context (#464) ([33f0eaa](https://github.com/framerslab/agentos/commit/33f0eaaf8a0853c2e809c41fb8da14fafba445dc))
+* **claims:** source text scanning and absence evidence (#457) ([a2f3117](https://github.com/framerslab/agentos/commit/a2f31178039a89c1f7eb1c2df6d468f6165bc574))
+
 ## [0.13.127](https://github.com/framerslab/agentos/compare/v0.13.126...v0.13.127) (2026-10-14)
 
 ### feat
