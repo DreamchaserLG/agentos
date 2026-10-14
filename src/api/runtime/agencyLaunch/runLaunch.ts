@@ -6,10 +6,37 @@
  * deadline and one grace, closes the team and returns one tool result. It never throws (spec 4.8).
  * @internal
  */
+import { randomUUID } from 'node:crypto';
+import { agency } from '../../agency.js';
+import type { Agent, AgencyCallbacks, AgencyOptions, AgencyStrategy } from '../../types.js';
+import { AgencyConfigError } from '../../types.js';
 import { IDENTIFIER_PATTERN } from '../../../cognition/emergent/ToolName.js';
-import type { AgencyStrategy } from '../../types.js';
-import type { SpendBudget } from '../spendBudget.js';
-import { MAX_ROLE_CHARS, MIN_LAUNCH_TOKENS, type LaunchAgencyArgs, type LaunchLimits, type LaunchRefusal } from './types.js';
+import type { ToolExecutionContext, ToolExecutionResult } from '../../../core/tools/ITool.js';
+import type { ApprovalGateFn } from '../approval-gate.js';
+import { SpendBudget } from '../spendBudget.js';
+import type { AgentOSUsageLedgerOptions } from '../usageLedger.js';
+import { launchRegistry, type LaunchEntry } from './launchRegistry.js';
+import type { SeatHandle } from './sessionSeat.js';
+import {
+  LAUNCH_AGENCY_TOOL_NAME,
+  LAUNCH_SETTLE_GRACE_MS,
+  LAUNCH_TEXT_CHARS,
+  MAX_ROLE_CHARS,
+  MIN_LAUNCH_TOKENS,
+  refusedInSeat,
+  stepsOutside,
+  type AgencyLaunchFrame,
+  type LaunchAgencyArgs,
+  type LaunchAgencyResult,
+  type LaunchLimits,
+  type LaunchRecordMetadata,
+  type LaunchRefusal,
+  type LaunchSeatRecord,
+  type LaunchStatus,
+  type LaunchUsage,
+  type SeatToolLike,
+  type ToolCallHook,
+} from './types.js';
 
 /** The six strategies a launch offers (spec D17). */
 const STRATEGIES: readonly AgencyStrategy[] = ['sequential', 'parallel', 'debate', 'review-loop', 'hierarchical', 'graph'];
@@ -26,6 +53,519 @@ const MAX_INSTRUCTIONS_CHARS = 8_192;
 const MAX_BRIEF_CHARS = 1_000;
 
 const isStringArray = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === 'string');
+
+/** The launching turn, as a launch sees it (spec 4.8). */
+export interface LaunchParent {
+  gmiId: string;
+  personaId: string;
+  sessionId: string;
+  conversationId?: string;
+  /** 0 at the root. */
+  depth: number;
+  limits: LaunchLimits;
+  budget?: SpendBudget;
+  approvalGate?: ApprovalGateFn;
+  signal?: AbortSignal;
+  providerUserId?: string;
+  namespace: string;
+  /** ctx.correlationId: the parent turn, whose launch pool a root launch draws on. */
+  turnId?: string;
+  /** The hooks the parent turn's calls ran under, outermost first (spec D12). */
+  toolHooks: readonly ToolCallHook[];
+  /** The output tokens one call of the route is counted with. */
+  outputEstimateTokens: number;
+  /**
+   * The root scope's id: the launching session as its agent knows it, never the calling GMI. On
+   * gmi() an id made once per agent and the session id, so two agents' sessions of one id are two scopes and a session
+   * that keeps no history (a GMI per turn) is one; on the full runtime the session's GMI and the session id. A nested
+   * launch's scope is its parent launch.
+   */
+  scopeId: string;
+}
+
+/** One seat after step 3: its form, its member, its names. */
+export type ResolvedSeat =
+  | { role: string; form: 'temporary'; instructions: string; toolNames: ReadonlySet<string>; dependsOn?: string[] }
+  | { role: string; form: 'persistent'; ref: string; brief?: string; toolNames: ReadonlySet<string>; dependsOn?: string[] };
+
+/** What a launch needs of its surface (gmi() or the full runtime). */
+export interface LaunchHost {
+  surface: 'gmi' | 'runtime';
+  /** The parent of a root launch (no frame): depth 0. */
+  rootParent(ctx: ToolExecutionContext): Promise<LaunchParent | LaunchRefusal>;
+  /** A root launch's parent tool names; a nested launch reads its seat's from the entry. */
+  parentToolNames(ctx: ToolExecutionContext, parent: LaunchParent): Promise<ReadonlySet<string>>;
+  /** A tool of the parent's table by name, read for a composition's step tools (spec D11). */
+  toolOf(ctx: ToolExecutionContext, name: string): Promise<SeatToolLike | undefined>;
+  /** Whether a member exists: an agentKey on gmi(), a personaId on the runtime. */
+  hasMember(ref: string): boolean;
+  /** Builds one seat; a refusal for a member that cannot be seated. Never throws. */
+  buildSeat(seat: ResolvedSeat, launch: LaunchEntry, parent: LaunchParent, frame: AgencyLaunchFrame, cutWhen: () => boolean): Promise<SeatHandle | LaunchRefusal>;
+  /** The child agency's own route: its manager's and synthesizers'. */
+  agencyRoute(parent: LaunchParent): Promise<Pick<AgencyOptions, 'provider' | 'model' | 'apiKey' | 'baseUrl'>>;
+  /** The host's callbacks, for the child agency's `on`. */
+  callbacks?: AgencyCallbacks;
+  /** gmi(): the parent's usage ledger, which the coordinator's calls record to under source `launch_agency`. */
+  usageLedger?: AgentOSUsageLedgerOptions;
+  /** The full runtime's registry entry; no-ops on gmi(). A recorder that throws is logged and the launch goes on. */
+  recorder: {
+    start(record: { agencyId: string; conversationId: string; meta: LaunchRecordMetadata; seats: SeatHandle[] }): void;
+    close(result: LaunchAgencyResult): void;
+  };
+  logError(error: unknown, where: string): void;
+  /** @internal The settle grace (tests shorten it); default LAUNCH_SETTLE_GRACE_MS. */
+  settleGraceMs?: number;
+}
+
+/** What the run came to. */
+type RunOutcome = { kind: 'resolved'; text: string } | { kind: 'rejected'; error: unknown } | { kind: 'unsettled' } | { kind: 'not_run' };
+
+/** Why the launch stopped early, set by the budget's function, the deadline and the parent's stop. */
+interface LaunchState {
+  exhausted: boolean;
+  timedOut: boolean;
+  cancelled: boolean;
+}
+
+/** A launch past admission: everything steps 6 to 10 read. */
+interface AdmittedLaunch {
+  host: LaunchHost;
+  args: LaunchAgencyArgs;
+  parent: LaunchParent;
+  entry: LaunchEntry;
+  seats: ResolvedSeat[];
+  strategy: AgencyStrategy;
+  child: SpendBudget;
+  coordinator: SpendBudget;
+  caps: { maxCostUSD: number; maxTotalTokens: number };
+  state: LaunchState;
+  controller: AbortController;
+  deadlineMs: number;
+  startedAt: Date;
+}
+
+const ZERO_USAGE = (): LaunchUsage => ({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+
+/** A refusal as a tool result: `processToolCall` hands the model `error` and `details`. */
+function refused(refusal: LaunchRefusal): ToolExecutionResult<LaunchAgencyResult> {
+  return { success: false, error: `${refusal.code}: ${refusal.reason}`, details: { code: refusal.code, reason: refusal.reason } };
+}
+
+function isRefusal(value: unknown): value is LaunchRefusal {
+  return typeof value === 'object' && value !== null && typeof (value as LaunchRefusal).code === 'string' && typeof (value as LaunchRefusal).reason === 'string';
+}
+
+/**
+ * Logs through the host, ignoring a logger that throws: the launch's result and its seats' release come first, and
+ * `runLaunch` never throws (spec 4.8, D16). A host's own logger, such as one passed to
+ * `AgentOS.create`, makes no promise not to throw.
+ */
+function logSafely(host: LaunchHost, error: unknown, where: string): void {
+  try {
+    host.logError(error, where);
+  } catch {
+    // A logger that throws is not a failure of the launch.
+  }
+}
+
+/** The frame a turn's tool call carries (`sessionData.agencyLaunch`), when it is well formed. */
+function frameIn(sessionData: Record<string, unknown> | undefined): AgencyLaunchFrame | undefined {
+  const frame = sessionData?.agencyLaunch as Partial<AgencyLaunchFrame> | undefined;
+  if (!frame || typeof frame.launchId !== 'string' || typeof frame.role !== 'string' || typeof frame.depth !== 'number') return undefined;
+  return { launchId: frame.launchId, role: frame.role, depth: frame.depth };
+}
+
+/**
+ * Step 2: the parent. A frame naming a live entry gives the depth, the limits, the budget, the user, the namespace and
+ * the calling seat's names; the call's own context gives the gate and the hooks it carries (the entry's then the
+ * member's own), else the entry's. A frame naming a closing or missing entry is refused. No frame: the host's root.
+ */
+async function resolveParent(host: LaunchHost, ctx: ToolExecutionContext): Promise<{ parent: LaunchParent; toolNames: ReadonlySet<string>; frame?: AgencyLaunchFrame } | LaunchRefusal> {
+  const frame = frameIn(ctx.sessionData);
+  if (!frame) {
+    const root = await host.rootParent(ctx);
+    if (isRefusal(root)) return root;
+    return { parent: root, toolNames: await host.parentToolNames(ctx, root) };
+  }
+  const entry = launchRegistry.get(frame.launchId);
+  if (!entry || entry.state === 'closing') {
+    return { code: 'parent_launch_closed', reason: `the team this turn sits in (${frame.launchId}) is closing or gone` };
+  }
+  const gate = ctx.callerTurn?.approvalGate ?? entry.approvalGate;
+  const conversationId = ctx.sessionData?.conversationId;
+  return {
+    frame,
+    toolNames: entry.seatTools.get(frame.role) ?? new Set<string>(),
+    parent: {
+      gmiId: ctx.gmiId,
+      personaId: ctx.personaId,
+      sessionId: String(ctx.sessionData?.sessionId ?? ctx.gmiId),
+      ...(typeof conversationId === 'string' ? { conversationId } : {}),
+      depth: entry.depth,
+      limits: entry.limits,
+      budget: entry.budget,
+      ...(gate ? { approvalGate: gate } : {}),
+      signal: ctx.signal ? AbortSignal.any([entry.signal, ctx.signal]) : entry.signal,
+      ...(entry.providerUserId !== undefined ? { providerUserId: entry.providerUserId } : {}),
+      namespace: entry.namespace,
+      ...(ctx.correlationId ? { turnId: ctx.correlationId } : {}),
+      toolHooks: ctx.callerTurn?.toolHooks ?? entry.toolHooks,
+      outputEstimateTokens: entry.outputEstimateTokens,
+      // A nested launch's scope is the launch its team comes from (spec D8).
+      scopeId: frame.launchId,
+    },
+  };
+}
+
+/** Every tool the allowlists name and, for each composition, its step tools in turn, each read once. */
+async function collectTools(names: string[], toolOf: (name: string) => Promise<SeatToolLike | undefined>): Promise<Map<string, SeatToolLike | undefined>> {
+  const found = new Map<string, SeatToolLike | undefined>();
+  const queue = [...new Set(names)];
+  for (let name = queue.shift(); name !== undefined; name = queue.shift()) {
+    if (found.has(name)) continue;
+    const tool = await toolOf(name);
+    found.set(name, tool);
+    for (const step of tool?.stepTools ?? []) if (!found.has(step)) queue.push(step);
+  }
+  return found;
+}
+
+/**
+ * Step 3: the bounds. The level against `maxDepth`, the seat count against `maxSeats`, the forms the surface takes,
+ * the members, and each allowlist: a self-modification or memory tool, or launch_agency where the seat's level cannot
+ * launch, is `tool_not_allowed`; a name the parent lacks is `unknown_tool`; a composed tool any of whose step tools the
+ * same allowlist leaves out is `tool_not_allowed`.
+ */
+async function checkBounds(host: LaunchHost, ctx: ToolExecutionContext, args: LaunchAgencyArgs, parent: LaunchParent, parentNames: ReadonlySet<string>): Promise<ResolvedSeat[] | LaunchRefusal> {
+  const { limits } = parent;
+  const level = parent.depth + 1;
+  if (level > limits.maxDepth) return { code: 'depth_exceeded', reason: `a team at level ${level} would pass maxDepth ${limits.maxDepth}` };
+  if (args.seats.length > limits.maxSeats) return { code: 'too_many_seats', reason: `${args.seats.length} seats; at most ${limits.maxSeats}` };
+  const canLaunch = level + 1 <= limits.maxDepth;
+  const tools = await collectTools(args.seats.flatMap((seat) => seat.tools ?? []), (name) => host.toolOf(ctx, name));
+  const refs = new Set<string>();
+  const resolved: ResolvedSeat[] = [];
+  for (const seat of args.seats) {
+    const fields = seat as { agentKey?: string; personaId?: string; instructions?: string; brief?: string };
+    if (fields.personaId !== undefined && host.surface === 'gmi') {
+      return { code: 'seat_form_unsupported', reason: `seat '${seat.role}': personaId seats run on the full runtime; name a member by agentKey` };
+    }
+    if (fields.agentKey !== undefined && host.surface === 'runtime') {
+      return { code: 'seat_form_unsupported', reason: `seat '${seat.role}': agentKey seats run on gmi(); name a registered persona by personaId` };
+    }
+    const ref = fields.agentKey ?? fields.personaId;
+    if (ref !== undefined) {
+      if (!host.hasMember(ref)) return { code: 'unknown_member', reason: `seat '${seat.role}': no member '${ref}'` };
+      if (refs.has(ref)) return { code: 'duplicate_member', reason: `member '${ref}' is named by two seats` };
+      refs.add(ref);
+    }
+    const names = new Set(seat.tools ?? []);
+    for (const name of names) {
+      const why = name === LAUNCH_AGENCY_TOOL_NAME ? (canLaunch ? undefined : `launch_agency, which a seat at level ${level} cannot use (maxDepth ${limits.maxDepth})`) : refusedInSeat(name);
+      if (why) return { code: 'tool_not_allowed', reason: `seat '${seat.role}': '${name}' is ${why}` };
+      if (!parentNames.has(name)) return { code: 'unknown_tool', reason: `seat '${seat.role}': the launching agent has no tool '${name}'` };
+      const outside = stepsOutside(tools.get(name), names, (step) => tools.get(step));
+      if (outside.length > 0) {
+        return { code: 'tool_not_allowed', reason: `seat '${seat.role}': '${name}' is a composed tool whose step '${outside[0]}' the seat's allowlist leaves out` };
+      }
+    }
+    const dependsOn = seat.dependsOn ? { dependsOn: [...seat.dependsOn] } : {};
+    resolved.push(
+      ref === undefined
+        ? { role: seat.role, form: 'temporary', instructions: fields.instructions ?? '', toolNames: names, ...dependsOn }
+        : { role: seat.role, form: 'persistent', ref, ...(fields.brief ? { brief: fields.brief } : {}), toolNames: names, ...dependsOn },
+    );
+  }
+  return resolved;
+}
+
+const frameFor = (entry: LaunchEntry, role: string): AgencyLaunchFrame => ({ launchId: entry.launchId, role, depth: entry.depth });
+
+/** Closes seats, logging a close that rejects. */
+async function closeAll(seats: SeatHandle[], host: LaunchHost): Promise<void> {
+  await Promise.all(seats.map((seat) => seat.close().catch((error: unknown) => logSafely(host, error, 'launch_agency close'))));
+}
+
+function recordMeta(launch: AdmittedLaunch, status: LaunchRecordMetadata['status']): LaunchRecordMetadata {
+  return {
+    kind: 'launched',
+    parentGmiId: launch.parent.gmiId,
+    parentPersonaId: launch.parent.personaId,
+    launchingSessionId: launch.parent.sessionId,
+    depth: launch.entry.depth,
+    strategy: launch.strategy,
+    goalPreview: launch.args.goal.slice(0, 200),
+    startedAt: launch.startedAt.toISOString(),
+    status,
+  };
+}
+
+/** Step 7's record: the full runtime's registry entry. A recorder that throws is logged and the launch goes on. */
+function recordStart(launch: AdmittedLaunch, seats: SeatHandle[]): void {
+  try {
+    launch.host.recorder.start({ agencyId: launch.entry.launchId, conversationId: launch.parent.conversationId ?? launch.parent.sessionId, meta: recordMeta(launch, 'running'), seats });
+  } catch (error) {
+    logSafely(launch.host, error, 'launch_agency record');
+  }
+}
+
+/** The child agency (spec D17): the parent's route as its own, the seats as its roster, the root's hitl at the root only. */
+async function childAgencyOptions(launch: AdmittedLaunch, seats: SeatHandle[]): Promise<AgencyOptions> {
+  const route = await launch.host.agencyRoute(launch.parent);
+  return {
+    name: `launch:${launch.entry.launchId}`,
+    strategy: launch.strategy,
+    agents: Object.fromEntries(seats.map((seat, i) => [launch.seats[i].role, seat])),
+    maxRounds: launch.args.maxRounds ?? 3,
+    ...route,
+    ...(launch.parent.depth === 0 && launch.parent.limits.hitl ? { hitl: launch.parent.limits.hitl } : {}),
+    ...(launch.host.callbacks ? { on: launch.host.callbacks } : {}),
+  };
+}
+
+/** Step 7's call: the goal once, under the launch's signal, the coordinator's budget, the ledger and the parent's gate. */
+function runTeam(launch: AdmittedLaunch, team: Agent): Promise<RunOutcome> {
+  const { host, parent } = launch;
+  return team
+    .generate(launch.args.goal, {
+      abortSignal: launch.controller.signal,
+      budget: launch.coordinator,
+      ...(host.usageLedger ? { usageLedger: { ...host.usageLedger, source: 'launch_agency' } } : {}),
+      ...(parent.approvalGate ? { __approvalGate: parent.approvalGate } : {}),
+    })
+    .then(
+      (value): RunOutcome => ({ kind: 'resolved', text: String((value as { text?: unknown } | null)?.text ?? '') }),
+      (error: unknown): RunOutcome => ({ kind: 'rejected', error }),
+    );
+}
+
+function notRun(seat: ResolvedSeat): LaunchSeatRecord {
+  return { role: seat.role, form: seat.form, ...(seat.form === 'persistent' ? { member: seat.ref } : {}), status: 'not_run', calls: 0, summary: '', usage: ZERO_USAGE() };
+}
+
+/** Step 8's status: the first that holds. */
+function statusOf(state: LaunchState, outcome: RunOutcome): LaunchStatus {
+  if (state.exhausted) return 'budget_exhausted';
+  if (state.timedOut) return 'timed_out';
+  if (state.cancelled) return 'cancelled';
+  return outcome.kind === 'resolved' ? 'completed' : 'failed';
+}
+
+function reasonOf(status: LaunchStatus, launch: AdmittedLaunch, seats: LaunchSeatRecord[], outcome: RunOutcome): string | undefined {
+  switch (status) {
+    case 'completed':
+      return undefined;
+    case 'budget_exhausted':
+      return `the launch's budget is spent: ${launch.child.tokensUsed()} of ${launch.caps.maxTotalTokens} tokens`;
+    case 'timed_out':
+      return `the deadline of ${launch.deadlineMs} ms passed`;
+    case 'cancelled':
+      return 'the parent turn stopped';
+    default: {
+      const seat = seats.find((record) => record.status === 'failed' && record.error);
+      if (seat?.error) return `seat '${seat.role}' failed: ${seat.error.name}${seat.error.code ? ` (${seat.error.code})` : ''}`;
+      if (outcome.kind === 'rejected') {
+        const error = outcome.error as { name?: unknown; code?: unknown } | null;
+        const name = typeof error?.name === 'string' ? error.name : 'Error';
+        return `the team failed: ${name}${typeof error?.code === 'string' ? ` (${error.code})` : ''}`;
+      }
+      return outcome.kind === 'unsettled' ? 'the team did not settle' : 'no seat ran';
+    }
+  }
+}
+
+/**
+ * Step 10: the result, recorded, as the tool's output.
+ *
+ * @param state - The launch's state when the run settled (a stop that came during the close does not change it).
+ */
+function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome, state: LaunchState = launch.state): ToolExecutionResult<LaunchAgencyResult> {
+  const seats = launch.seats.map((seat, i) => built[i]?.record() ?? notRun(seat));
+  const usage = seats.reduce<LaunchUsage>((sum, record) => {
+    sum.promptTokens += record.usage.promptTokens;
+    sum.completionTokens += record.usage.completionTokens;
+    sum.totalTokens += record.usage.totalTokens;
+    if (record.usage.costUSD !== undefined) sum.costUSD = (sum.costUSD ?? 0) + record.usage.costUSD;
+    return sum;
+  }, ZERO_USAGE());
+  const status = statusOf(state, outcome);
+  const reason = reasonOf(status, launch, seats, outcome);
+  const text = outcome.kind === 'resolved' ? outcome.text : '';
+  const truncated = text.length > LAUNCH_TEXT_CHARS;
+  const closedAt = new Date();
+  const result: LaunchAgencyResult = {
+    status,
+    agencyId: launch.entry.launchId,
+    text: truncated ? text.slice(0, LAUNCH_TEXT_CHARS) : text,
+    truncated,
+    seats,
+    usage,
+    coordinatorUsage: { totalTokens: launch.coordinator.tokensUsed(), costUSD: launch.coordinator.spentUSD() },
+    durationMs: closedAt.getTime() - launch.startedAt.getTime(),
+    ...(reason ? { reason } : {}),
+    provenance: {
+      agencyId: launch.entry.launchId,
+      strategy: launch.strategy,
+      depth: launch.entry.depth,
+      parentGmiId: launch.parent.gmiId,
+      parentSessionId: launch.parent.sessionId,
+      startedAt: launch.startedAt.toISOString(),
+      closedAt: closedAt.toISOString(),
+      deadlineMs: launch.deadlineMs,
+      budget: {
+        ...(Number.isFinite(launch.caps.maxCostUSD) ? { maxCostUSD: launch.caps.maxCostUSD } : {}),
+        maxTotalTokens: launch.caps.maxTotalTokens,
+        spentUSD: launch.child.spentUSD(),
+        tokensUsed: launch.child.tokensUsed(),
+      },
+    },
+  };
+  try {
+    launch.host.recorder.close(result);
+  } catch (error) {
+    logSafely(launch.host, error, 'launch_agency record');
+  }
+  return { success: true, output: result };
+}
+
+/**
+ * Steps 6 to 10, without a deadline. The seats are built in order, the team runs the goal
+ * once, the team is closed, and the entry goes.
+ */
+async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<LaunchAgencyResult>> {
+  const { host, parent, entry } = launch;
+  const built: SeatHandle[] = [];
+  let team: Agent | undefined;
+  let outcome: RunOutcome = { kind: 'not_run' };
+  try {
+    for (const seat of launch.seats) entry.seatTools.set(seat.role, seat.toolNames);
+    const cutWhen = (): boolean => launch.state.exhausted || launch.controller.signal.aborted;
+    for (const seat of launch.seats) {
+      const made = await host.buildSeat(seat, entry, parent, frameFor(entry, seat.role), cutWhen);
+      if (isRefusal(made)) {
+        await closeAll(built, host);
+        return refused(made);
+      }
+      built.push(made);
+    }
+    try {
+      team = agency(await childAgencyOptions(launch, built));
+    } catch (error) {
+      if (!(error instanceof AgencyConfigError)) throw error;
+      await closeAll(built, host);
+      return refused({ code: 'invalid_arguments', reason: error.message });
+    }
+    // The record starts once the child is built, so a configuration agency() refuses leaves no record behind.
+    recordStart(launch, built);
+    outcome = await runTeam(launch, team);
+    if (outcome.kind === 'rejected') logSafely(host, outcome.error, 'launch_agency run');
+    // The engine closes the seats itself, each once, every close attempted: agency().close() awaits its members in turn
+    // and stops at the first that rejects, and the child holds nothing else a launch opened.
+    await closeAll(built, host);
+  } catch (error) {
+    logSafely(host, error, 'launch_agency');
+    outcome = { kind: 'rejected', error };
+    await closeAll(built, host);
+  } finally {
+    launchRegistry.remove(entry.launchId);
+  }
+  return finish(launch, built, outcome);
+}
+
+/**
+ * One run of `launch_agency` (spec 4.8): validate, resolve the parent, check the bounds, size the budget, admit, then
+ * build, run, settle, close and report. Never throws: a refusal is `{ success: false, error: '<code>: <reason>',
+ * details }`, every launch that started is `{ success: true, output }` whatever its status, and an unexpected error
+ * before admission is logged and reported as a `failed` launch.
+ */
+export async function runLaunch(host: LaunchHost, args: LaunchAgencyArgs, ctx: ToolExecutionContext): Promise<ToolExecutionResult<LaunchAgencyResult>> {
+  const startedAt = new Date();
+  const agencyId = `agency-${randomUUID()}`;
+  let depth = 1;
+  try {
+    const invalid = validateLaunchArgs(args);
+    if (invalid) return refused(invalid);
+    const resolved = await resolveParent(host, ctx);
+    if (isRefusal(resolved)) return refused(resolved);
+    const { parent, toolNames, frame } = resolved;
+    depth = parent.depth + 1;
+    const seats = await checkBounds(host, ctx, args, parent, toolNames);
+    if (isRefusal(seats)) return refused(seats);
+
+    // 4. The budget: a root launch draws on its turn's pool; a nested one on its parent launch's budget.
+    // A root launch's scope is the launching session as its host names it, never the calling GMI.
+    const scopeKey = frame ? frame.launchId : `${host.surface}:${parent.scopeId}`;
+    const pool = frame ? undefined : launchRegistry.rootPool(scopeKey, parent.turnId, parent.limits, parent.budget);
+    const caps = childBudgetCaps(parent.budget, pool, parent.limits, args, parent.outputEstimateTokens);
+    if (isRefusal(caps)) return refused(caps);
+    const state: LaunchState = { exhausted: false, timedOut: false, cancelled: false };
+    const upstream = pool ?? parent.budget;
+    const child = new SpendBudget({
+      maxCostUSD: caps.maxCostUSD,
+      maxTotalTokens: caps.maxTotalTokens,
+      unpriced: 'allow',
+      ...(upstream ? { parent: upstream } : {}),
+      // Runs before every refusal, this budget's own or an ancestor's: the launch reads exhaustion from here.
+      onLimitReached: () => {
+        state.exhausted = true;
+      },
+    });
+    const coordinator = new SpendBudget({ maxCostUSD: Number.POSITIVE_INFINITY, unpriced: 'allow', parent: child });
+
+    // 5. Admit.
+    const controller = new AbortController();
+    const entry: LaunchEntry = {
+      launchId: agencyId,
+      depth,
+      limits: parent.limits,
+      scopeKey,
+      budget: child,
+      ...(parent.approvalGate ? { approvalGate: parent.approvalGate } : {}),
+      signal: controller.signal,
+      ...(parent.providerUserId !== undefined ? { providerUserId: parent.providerUserId } : {}),
+      namespace: parent.namespace,
+      toolHooks: parent.toolHooks,
+      seatTools: new Map(),
+      outputEstimateTokens: parent.outputEstimateTokens,
+      state: 'running',
+    };
+    const admitted = launchRegistry.admit(entry);
+    if (!admitted.ok) {
+      return refused({ code: 'concurrency_exceeded', reason: `${admitted.inFlight} launch(es) of this scope in flight; at most ${parent.limits.maxConcurrent}` });
+    }
+    const deadlineMs = Math.min(args.deadlineMs ?? parent.limits.defaultDeadlineMs, parent.limits.maxDeadlineMs);
+    return await runAdmitted({ host, args, parent, entry, seats, strategy: args.strategy ?? 'sequential', child, coordinator, caps, state, controller, deadlineMs, startedAt });
+  } catch (error) {
+    logSafely(host, error, 'launch_agency');
+    const name = error instanceof Error ? error.name : 'Error';
+    const closedAt = new Date().toISOString();
+    return {
+      success: true,
+      output: {
+        status: 'failed',
+        agencyId,
+        text: '',
+        truncated: false,
+        seats: [],
+        usage: ZERO_USAGE(),
+        coordinatorUsage: { totalTokens: 0, costUSD: 0 },
+        durationMs: Date.now() - startedAt.getTime(),
+        reason: `the launch failed before it ran: ${name}`,
+        provenance: {
+          agencyId,
+          strategy: args?.strategy ?? 'sequential',
+          depth,
+          parentGmiId: ctx.gmiId,
+          parentSessionId: String(ctx.sessionData?.sessionId ?? ctx.gmiId),
+          startedAt: startedAt.toISOString(),
+          closedAt,
+          deadlineMs: 0,
+          budget: { maxTotalTokens: 0, spentUSD: 0, tokensUsed: 0 },
+        },
+      },
+    };
+  }
+}
 
 /**
  * Step 1: the arguments' own rules (types, required fields and the strategy's names are the input schema's too, so a
