@@ -1,3 +1,13 @@
+## [0.13.131](https://github.com/framerslab/agentos/compare/v0.13.130...v0.13.131) (2026-10-14)
+
+### ci
+
+* pin the Moonshine test model's checksums and ignore the cache (#466) ([5977d0b](https://github.com/framerslab/agentos/commit/5977d0bd113a03a44adcdb49d972dda41af8b1b8))
+
+### fix
+
+* **voice-pipeline:** report a refusal whose reason cannot be printed, keep one speech source per session, close the late-final window at a session's start (#472) ([10bece4](https://github.com/framerslab/agentos/commit/10bece41bd7689820ee0894f4c8a8706f483e677))
+
 ## [0.13.130](https://github.com/framerslab/agentos/compare/v0.13.129...v0.13.130) (2026-10-14)
 
 ### fix
