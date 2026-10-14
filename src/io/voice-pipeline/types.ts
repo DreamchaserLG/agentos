@@ -698,11 +698,12 @@ export interface TurnCompleteEvent {
  * A detector that drops such a final from its turns emits `'late_final'`
  * with the final as it was pushed, once per final it drops
  * ({@link HeuristicEndpointDetector} does, for an item-keyed final that
- * arrives after a reset ended its turn and before the next `speech_end` or a
- * standalone VAD's next `speech_start`, while the transcriber's next
- * utterance is spoken included). `VoicePipelineOrchestrator` does not
- * listen for it, so the conversation leaves those words out;
- * `startListenSession` writes the final to its sink as a turn of its own.
+ * arrives after a reset ended its turn and before the next `speech_end`, a
+ * standalone VAD's next `speech_start` or a reset with `'session'`, while the
+ * transcriber's next utterance is spoken included).
+ * `VoicePipelineOrchestrator` does not listen for it, so the conversation
+ * leaves those words out; `startListenSession` writes the final to its sink
+ * as a turn of its own.
  *
  * @see {@link HeuristicEndpointDetector} for the rule-based implementation.
  * @see {@link AcousticEndpointDetector} for the purely acoustic implementation.
@@ -740,9 +741,19 @@ export interface IEndpointDetector extends EventEmitterLike {
 
   /**
    * Reset all internal state (timers, partial transcripts) without destroying
-   * the detector instance. Called at the start of each new turn.
+   * the detector instance. Called at the start of each new turn, and with
+   * `'session'` as a session starts on the detector
+   * (`VoicePipelineOrchestrator.startSession()` and `startListenSession()`
+   * make that call), so a detector a host hands to one session after another
+   * starts each with nothing an earlier session left.
+   *
+   * @param scope - `'turn'` (the default) ends a turn, and a final of that turn
+   *   can still arrive after it ({@link HeuristicEndpointDetector} drops such a
+   *   late final and reports it as `'late_final'`); `'session'` starts a
+   *   session, whose transcriber sends no final of an earlier session's turns,
+   *   so nothing from before it is awaited.
    */
-  reset(): void;
+  reset(scope?: 'turn' | 'session'): void;
 }
 
 // ============================================================================
@@ -1581,6 +1592,9 @@ export interface VoicePipelineSession extends EventEmitterLike {
  * `toClientTranscriptMessage()` makes one from a `TranscriptEvent`;
  * `isClientTranscriptMessage()` checks one a server received, and
  * `transcriptEventFromClient()` turns it back into a `TranscriptEvent`.
+ * `VoicePipelineOrchestrator` takes a session's speech from the first source
+ * it receives: a session that received audio first drops these messages, and
+ * one that received a message first drops the audio.
  *
  * @example
  * ```typescript
