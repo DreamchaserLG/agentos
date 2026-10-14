@@ -1,3 +1,10 @@
+## [0.13.132](https://github.com/framerslab/agentos/compare/v0.13.131...v0.13.132) (2026-10-14)
+
+### fix
+
+* **voice-pipeline:** the Moonshine browser provider in a chain: a dispose during start, retraction finals on failover, distinct instances, the base URL and the install hint (#475) ([5730e44](https://github.com/framerslab/agentos/commit/5730e4492b7fbec9e61b637fb8c804d211f479ca))
+* **voice:** accurate capabilities and explicit agency audio refusal (#470) ([62d64ce](https://github.com/framerslab/agentos/commit/62d64cec9ecb0a4cc0d8f0d3520cb90999947ca3))
+
 ## [0.13.131](https://github.com/framerslab/agentos/compare/v0.13.130...v0.13.131) (2026-10-14)
 
 ### ci
