@@ -1,3 +1,13 @@
+## [0.13.129](https://github.com/framerslab/agentos/compare/v0.13.128...v0.13.129) (2026-10-14)
+
+### fix
+
+* **logging:** contain private provider diagnostics ([6589668](https://github.com/framerslab/agentos/commit/6589668b459a1608edfd6f4ad613baff0c16fd27))
+
+### test
+
+* **library:** prove the source derivation locks against held transactions ([e2edf44](https://github.com/framerslab/agentos/commit/e2edf44f13889b18097b8b824ab0031267b21697))
+
 ## [0.13.128](https://github.com/framerslab/agentos/compare/v0.13.127...v0.13.128) (2026-10-14)
 
 ### feat
