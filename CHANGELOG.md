@@ -1,3 +1,9 @@
+## [0.13.125](https://github.com/framerslab/agentos/compare/v0.13.124...v0.13.125) (2026-10-14)
+
+### feat
+
+* **rag:** support storage adapters in Postgres vectors ([169dffd](https://github.com/framerslab/agentos/commit/169dffdabb473cfdbb6b3214e399de50f2ea9a05))
+
 ## [0.13.124](https://github.com/framerslab/agentos/compare/v0.13.123...v0.13.124) (2026-10-14)
 
 ### fix
