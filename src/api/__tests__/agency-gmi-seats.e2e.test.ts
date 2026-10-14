@@ -10,6 +10,8 @@ import { agency } from '../agency';
 import { agent } from '../agent';
 import { gmi } from '../gmi';
 import { AgencyConfigError } from '../types';
+import type { ApprovalDecision, ApprovalRequest } from '../types';
+import { SpendBudget } from '../runtime/spendBudget';
 import { buildSessionSeat, sessionSeat } from '../runtime/agencyLaunch/sessionSeat';
 import { reply, script } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
@@ -197,5 +199,47 @@ describe('agency() seats served by GMIs', () => {
     await vi.waitFor(() => expect(observe).toHaveBeenCalledWith('user', 'Own words.'));
     expect(getContext.mock.calls.some(([text]) => text.includes('CANARY-THREE'))).toBe(false);
     expect(observe.mock.calls.some(([, text]) => text.includes('CANARY-THREE'))).toBe(false);
+  });
+
+  it("a sessionSeat streams under the agency's gate, budget and names", async () => {
+    const k = key();
+    const s = script('openai', k, {
+      replies: [
+        reply.tools([{ id: 'c1', name: 'send_email', args: { to: 'team' } }, { id: 'c2', name: 'search', args: { q: 'x' } }]),
+        reply.text('Mail held.'),
+      ],
+    });
+    const sendEmail = vi.fn(async () => 'sent');
+    const search = vi.fn(async () => 'found');
+    const member = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Send mail.',
+      tools: {
+        send_email: { description: 'Send an email.', parameters: { type: 'object', properties: { to: { type: 'string' } } }, execute: sendEmail },
+        search: { description: 'Look things up.', parameters: { type: 'object', properties: { q: { type: 'string' } } }, execute: search },
+      },
+    });
+    const asked: string[] = [];
+    const handler = async (request: ApprovalRequest): Promise<ApprovalDecision> => {
+      asked.push(request.action);
+      return { approved: false, reason: 'mail is paused' };
+    };
+    const budget = new SpendBudget({ maxCostUSD: 1, maxTotalTokens: 100_000, unpriced: 'allow' });
+    const team = agency({
+      provider: 'openai', model: 'stub-model', apiKey: k, strategy: 'sequential',
+      hitl: { approvals: { beforeTool: ['send_email'] }, handler },
+      agents: { mailer: sessionSeat(member, { tools: ['send_email'] }) },
+    });
+
+    const streamed = team.stream('Email the team.', { budget });
+    expect(await streamed.text).toBe('Mail held.');
+    expect(asked).toEqual(['send_email']);
+    expect(sendEmail).not.toHaveBeenCalled();
+    // A tool outside the seat's names is neither offered nor run.
+    expect(search).not.toHaveBeenCalled();
+    const offered = JSON.stringify(s.seen[0].options.tools ?? []);
+    expect(offered).toContain('send_email');
+    expect(offered).not.toContain('search');
+    // The budget the stream carried was charged for the seat's steps.
+    expect(budget.tokensUsed()).toBeGreaterThan(0);
   });
 });
