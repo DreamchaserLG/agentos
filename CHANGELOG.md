@@ -1,3 +1,9 @@
+## [0.13.117](https://github.com/framerslab/agentos/compare/v0.13.116...v0.13.117) (2026-10-14)
+
+### feat
+
+* **meetings:** immutable funding and composite entitlement (#434) ([b259b2f](https://github.com/framerslab/agentos/commit/b259b2f234301edfc8f24acad332d6e0d03c2650))
+
 ## [0.13.116](https://github.com/framerslab/agentos/compare/v0.13.115...v0.13.116) (2026-10-14)
 
 ### feat
