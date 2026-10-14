@@ -1,3 +1,17 @@
+## [0.13.127](https://github.com/framerslab/agentos/compare/v0.13.126...v0.13.127) (2026-10-14)
+
+### feat
+
+* **voice-platform:** scoped configured runtime and authenticated reference host (#446) ([7c36344](https://github.com/framerslab/agentos/commit/7c36344f97150c154a5fdcee8e3b77b2b3dd255a))
+
+### test
+
+* **meetings:** refuse the promise-based and record-specific DNS lookups in the package consumer too (#463) ([6213eb7](https://github.com/framerslab/agentos/commit/6213eb7babf68aebfb40d63eff7903b56ee12648))
+
+### docs
+
+* say which verify:exports checks run only on GitHub Actions and which run checks the published package (#462) ([0b5653f](https://github.com/framerslab/agentos/commit/0b5653fb9f449a6eba51c22e647a3235aac9dd86))
+
 ## [0.13.126](https://github.com/framerslab/agentos/compare/v0.13.125...v0.13.126) (2026-10-14)
 
 ### fix
