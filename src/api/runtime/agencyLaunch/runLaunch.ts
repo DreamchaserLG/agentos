@@ -462,7 +462,8 @@ function finish(launch: AdmittedLaunch, built: SeatHandle[], outcome: RunOutcome
  * Steps 6 to 10. One real-time timer per launch (never the learning layer's clock): at the deadline, or when the
  * parent turn stops, the launch signal aborts, which every seat's turn and the coordinator's calls run under. The
  * launch then waits one grace for the run to settle and the team to close, together, and returns; a run that resolved
- * before any abort gets the whole grace for its close.
+ * before any abort gets the whole grace for its close. Once the run has settled the signal aborts in any case, before
+ * the seats close, so no seat's call runs on past its launch.
  */
 async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<LaunchAgencyResult>> {
   const { host, parent, entry, controller, state } = launch;
@@ -544,6 +545,10 @@ async function runAdmitted(launch: AdmittedLaunch): Promise<ToolExecutionResult<
       }
       settled = { ...state };
       if (outcome.kind === 'rejected') logSafely(host, outcome.error, 'launch_agency run');
+      // The launch stops waiting for its team here, and its timer and its parent's stop end with it, so its signal
+      // aborts now: a run can reject while a seat still runs (a graph tier awaits its seats together and rejects at the
+      // first that fails), and that seat stops instead of running on past its launch.
+      if (!controller.signal.aborted) controller.abort(Object.assign(new Error('the launch has ended'), { name: 'LaunchEndedError' }));
       // 9. Close: every seat once, every close attempted (spec D20). Not team.close(): agency().close() stops at the
       // first member that rejects, which would free the scope with later seats open.
       const closing = hold(closeAll(built, host));
