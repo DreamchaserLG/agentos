@@ -1,3 +1,9 @@
+## [0.13.141](https://github.com/framerslab/agentos/compare/v0.13.140...v0.13.141) (2026-10-15)
+
+### fix
+
+* **voice-pipeline:** suppress a backchannel only while the agent holds the floor (#489) ([d85fc93](https://github.com/framerslab/agentos/commit/d85fc93d3d61b0a71a5ce5e346260b3561c04438))
+
 ## [0.13.140](https://github.com/framerslab/agentos/compare/v0.13.139...v0.13.140) (2026-10-15)
 
 ### fix
