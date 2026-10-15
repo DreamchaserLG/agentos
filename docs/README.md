@@ -46,7 +46,7 @@
 
 #### Safety & Security
 
-- [**Guardrails System**](./safety/GUARDRAILS_USAGE.md) — Two-phase guardrail dispatch, built-in packs (PII, ML classifiers, topicality, code safety, grounding), and folder-level filesystem permissions
+- [**Guardrails System**](./safety/GUARDRAILS_USAGE.md) — Two-phase guardrail dispatch, the six built-in packs (PII redaction, ML classifiers, topicality, code safety, grounding guard, content policy rewriter), and the folder-level file permissions that Wunderland adds on top of AgentOS
 - [**Safety Primitives**](./safety/SAFETY_PRIMITIVES.md) — Circuit breakers, cost guards, stuck detection, and tool execution guards
 
 #### Memory & Storage
@@ -58,6 +58,15 @@
 - [**Immutable Agents**](./safety/IMMUTABLE_AGENTS.md) — Sealing lifecycle, toolset pinning, secret rotation, and soft-forget
 - [**Provenance Guide**](./safety/PROVENANCE.md) — HashChain, ChainVerifier, BundleExporter, proof levels, external anchors
 - [**Provenance & Immutability**](./safety/PROVENANCE_IMMUTABILITY.md) — Sealed storage policy, signed ledger, and anchoring
+
+#### Text Processing & Search
+
+- [**Text Processing & Search**](./text/TEXT_OVERVIEW.md): the section's map, what loads in a browser, and the runnable examples
+- [**Text Processing Pipeline**](./text/TEXT_PROCESSING.md): tokenizers for prose and code, stop words, Porter stemming and the three preset pipelines
+- [**Text Statistics and Classification**](./text/TEXT_STATISTICS.md): `StatisticalUtilityAI`, `LLMUtilityAI` and `HybridUtilityAI` for sentences, n-grams, keywords, readability, similarity, language, summaries and classification
+- [**Lexical and Hybrid Search**](./text/LEXICAL_AND_HYBRID_SEARCH.md): `LexicalIndex`, `BM25Index`, `FuzzyIndex`, `HybridSearcher` and reciprocal rank fusion
+- [**Chunking and Snippets**](./text/CHUNKING_AND_SNIPPETS.md): `SemanticChunker`, `chunkTurns`, `ChunkingEngine` and `snippetAround`
+- [**Reranking**](./text/RERANKING.md): `RerankerService` and the local, Cohere and LLM-judge rerankers
 
 #### AI & LLM
 
@@ -99,7 +108,7 @@
 
 ### API Reference
 
-- [**TypeDoc API**](./api/index.html) — Auto-generated API documentation
+- [**TypeDoc API**](https://docs.agentos.sh/api) — Auto-generated API documentation
 
 ---
 
@@ -119,7 +128,7 @@
 1. **New to AgentOS?** Start with the [README](../README.md) for installation and basic usage
 2. **Understanding the system?** Read the [Architecture Overview](./architecture/ARCHITECTURE.md)
 3. **Building features?** Check the relevant feature guide (Planning, HITL, Guardrails, etc.)
-4. **API details?** Browse the [TypeDoc API Reference](./api/index.html)
+4. **API details?** Browse the [TypeDoc API Reference](https://docs.agentos.sh/api)
 5. **Troubleshooting?** See [Platform Support](./architecture/PLATFORM_SUPPORT.md)
 
 ---
