@@ -38,12 +38,15 @@
  *
  * - The orchestrator does not resolve providers from ExtensionManager: every
  *   component is injected via {@link VoicePipelineOverrides}.
- * - Event wiring is done once during `startSession()` and never rewired.
+ * - Event wiring is done once during `startSession()` and never rewired. The
+ *   endpoint detector is the host's, which can hand it to one session after
+ *   another: a stop removes the listeners the session added to it.
  * - Without a call profile, a client that transcribes on its own device sends
  *   `transcript` messages ({@link ClientTranscriptMessage}) in place of audio;
  *   they reach the endpoint detector as the STT session's transcripts do, each
- *   final joined with the turn's earlier ones, the client's lines standing in
- *   for its speech events (`_wireClientTranscripts`). A session takes its
+ *   final joined with the turn's earlier ones (a backchannel the detector
+ *   would drop reaches it on its own), the client's lines standing in for its
+ *   speech events (`_wireClientTranscripts`). A session takes its
  *   speech from the first source it receives, audio or transcript messages,
  *   and drops what arrives from the other, reporting the first drop as
  *   `'error'` (`_takesSpeechFrom`). A call profile ends the call on a
@@ -51,6 +54,14 @@
  * - A watchdog timer prevents a session without a call profile from staying in
  *   LISTENING forever if the user walks away (default 30 s). The watchdog
  *   resets after each completed turn.
+ * - An endpoint detector that takes `setAgentContext()` hears what the agent
+ *   is doing: neither speaking nor having asked anything as the session
+ *   starts, speaking as each reply starts, and not speaking as the reply
+ *   ends or a barge-in cuts it, with whether the reply's text, trimmed, ends
+ *   with `?`. From the session's first utterance, `HeuristicEndpointDetector`
+ *   drops a backchannel such as "uh huh" or "Sure." said over the agent or
+ *   after a statement, keeps a lone one that answers a question as the
+ *   user's turn, and never takes a final that ends with `?` for one.
  */
 
 import { EventEmitter } from 'node:events';
@@ -95,6 +106,7 @@ import {
 } from './types.js';
 import { isClientTranscriptMessage, transcriptEventFromClient } from './clientTranscript.js';
 import { describeReason, isError } from './describeReason.js';
+import type { VoiceEventListener } from './VoiceEventEmitter.js';
 
 /**
  * How long a client's open transcript line lasts with no message before it is
@@ -243,6 +255,12 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   private speechSource?: 'audio' | 'client';
   /** Whether the session has reported dropping speech from its other source; it reports that once. */
   private speechSourceDropReported = false;
+  /**
+   * The listeners this session added to its endpoint detector, each with its event (`_onEndpoint`). The host owns the
+   * detector and can hand it to one session after another, so the stop removes exactly these (`_releaseEndpoint`): a
+   * closed session's handlers then neither stay reachable from the detector nor count toward its listener limit.
+   */
+  private readonly endpointListeners: Array<{ event: string; listener: VoiceEventListener }> = [];
 
   /**
    * Create a new orchestrator with the given pipeline configuration.
@@ -299,6 +317,40 @@ export class VoicePipelineOrchestrator extends EventEmitter {
   }
 
   /**
+   * Adds a listener to the session's endpoint detector and records it in `endpointListeners`, so the stop removes it,
+   * and no listener the host or another session added.
+   *
+   * @param endpoint - The session's endpoint detector.
+   * @param event - The detector's event.
+   * @param listener - What the session runs on it.
+   */
+  private _onEndpoint(endpoint: IEndpointDetector, event: string, listener: VoiceEventListener): void {
+    endpoint.on(event, listener);
+    this.endpointListeners.push({ event, listener });
+  }
+
+  /**
+   * Removes the listeners this session added to its endpoint detector (`_onEndpoint`), as the session stops. An emit
+   * already under way, such as the `turn_complete` whose listener stopped the session, still calls them: an emitter
+   * calls the listeners present when the emit began.
+   */
+  private _releaseEndpoint(): void {
+    for (const { event, listener } of this.endpointListeners.splice(0)) this.endpoint?.off(event, listener);
+  }
+
+  /**
+   * Tells the endpoint detector the agent has stopped speaking, as its reply ends or a barge-in cuts it, and whether
+   * the reply asked a question: its text, trimmed, ends with `?`. After a question the detector keeps a lone
+   * backchannel such as "yeah" as the user's answer. The orchestrator holds the reply's text and how long its audio
+   * played, not which words were heard, so a reply a barge-in cut is judged by the text it had received.
+   *
+   * @param endpoint - The session's endpoint detector; one without `setAgentContext()` is told nothing.
+   */
+  private _replyEnded(endpoint: IEndpointDetector): void {
+    endpoint.setAgentContext?.({ speaking: false, askedQuestion: this.text.trim().endsWith('?') });
+  }
+
+  /**
    * Reset the watchdog timer for max turn duration. If the pipeline stays in
    * LISTENING for longer than {@link VoicePipelineConfig.maxTurnDurationMs}
    * (default 30 s) without a `turn_complete`, the watchdog gives the endpoint
@@ -318,7 +370,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * Without a call profile this method:
    * 1. Validates the orchestrator is in `'idle'` state and has its four components.
    * 2. Resets the endpoint detector with `'session'`, so a detector an earlier session used carries nothing of that
-   *    session into this one, such as a wait for the late final of its last turn.
+   *    session into this one, such as a wait for the late final of its last turn, then tells a detector that takes
+   *    `setAgentContext()` that the agent neither speaks nor has asked anything, so it reads backchannels by the
+   *    agent's context from the session's first utterance.
    * 3. Creates STT and TTS sub-sessions from the provided factories.
    * 4. Wires all event handlers (transport -> STT -> endpoint -> agent -> TTS -> transport, and a client's
    *    transcript messages -> endpoint).
@@ -359,11 +413,15 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     // This session's STT session sends no final of an earlier session's turns, so a detector an earlier session used
     // waits for none.
     overrides.endpointDetector.reset('session');
+    // The agent has said nothing yet. Told so, a detector reads backchannels by the agent's context from the session's
+    // first utterance; HeuristicEndpointDetector keeps its exact-phrase rule only for a caller that reports none.
+    overrides.endpointDetector.setAgentContext?.({ speaking: false, askedQuestion: false });
     this.transport = transport;
     this.agent = agent;
     this.endpoint = overrides.endpointDetector;
     this.watch(transport);
-    this.watch(this.endpoint);
+    // As watch() does for the other parts, and recorded: the detector is the host's and outlives the session.
+    this._onEndpoint(this.endpoint, 'error', () => this.reportFailure());
     try {
       this.stt = await overrides.streamingSTT.startSession({ language: this.config.language, providerOptions: this.config.sttOptions });
       this.watch(this.stt);
@@ -393,7 +451,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       this.supervise(() => endpoint.pushTranscript(event));
       this._watchSend(() => transport.sendControl({ type: 'transcript', text: event.text, isFinal: event.isFinal, confidence: event.confidence }));
     });
-    endpoint.on('turn_complete', (event: TurnCompleteEvent) => {
+    this._onEndpoint(endpoint, 'turn_complete', (event: TurnCompleteEvent) => {
       if (this.current !== 'listening') return;
       // Re-emitted for waitForUserTurn() and for hosts that listen on the orchestrator or on the session.
       this._emitEach(this, 'turn_complete', event);
@@ -409,6 +467,8 @@ export class VoicePipelineOrchestrator extends EventEmitter {
         const tokens = agent.sendText(event.transcript, { speakers: [], endpointReason: event.reason, speechDurationMs: event.durationMs, wasInterrupted: false, transcriptConfidence: event.confidence });
         // The reply gets its record before its audio is sent.
         this._currentReply = { audioRefusalReported: false };
+        // While the agent speaks, the detector drops a backchannel such as "uh huh".
+        endpoint.setAgentContext?.({ speaking: true, askedQuestion: false });
         this.stateTo('speaking');
         this.text = '';
         this.playedMs = 0;
@@ -430,7 +490,10 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       if (this.current !== 'speaking') return;
       this.stateTo('listening');
       this._watchSend(() => transport.sendControl({ type: 'agent_done', text: this.text, durationMs: this.playedMs }));
-      this.supervise(() => endpoint.reset());
+      this.supervise(() => {
+        endpoint.reset();
+        this._replyEnded(endpoint);
+      });
       this.resetWatchdog();
     });
     // Speech starting and ending: the STT session's speech_start and speech_end, or a client's transcript lines
@@ -451,6 +514,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
           this._watchSend(() => transport.sendControl({ type: 'barge_in', action }));
           if ((this.current as PipelineState) === 'closed') return;
           endpoint.reset();
+          this._replyEnded(endpoint);
           this.stateTo('listening');
           this.resetWatchdog();
         } else if (action.type === 'pause') this._watchSend(() => transport.sendControl({ type: 'barge_in', action }));
@@ -494,7 +558,11 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * with one would be kept per item and joined again. An interim reaches it
    * as it is. The turn's finals start again when the detector completes a
    * turn and when the pipeline returns to listening, where the detector is
-   * reset.
+   * reset. A final the detector's `isBackchannel()` answers `true` for
+   * reaches it on its own instead, also without the line's `itemId`, so the
+   * detector drops it and reports it as `'backchannel_detected'` and the
+   * turn's text stays as it was; a detector without `isBackchannel()` gets
+   * every final joined.
    *
    * A line opens with its first message that has text, so an empty line that
    * never opened is nothing, and an empty final closes its line without its
@@ -522,7 +590,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       for (const timer of lines.open.values()) clearTimeout(timer);
       lines.open.clear();
     };
-    endpoint.on('turn_complete', () => {
+    this._onEndpoint(endpoint, 'turn_complete', () => {
       lines.finals = [];
     });
     // `flush_complete` and a barge-in's cancel reset the detector as they return to listening.
@@ -614,10 +682,14 @@ export class VoicePipelineOrchestrator extends EventEmitter {
     if (text) {
       const event = transcriptEventFromClient(message);
       if (message.isFinal) {
-        // A turn's text stops growing at CLIENT_TURN_MAX_TEXT: later finals are left out.
-        if (lines.finals.join(' ').length < CLIENT_TURN_MAX_TEXT) lines.finals.push(text);
-        event.text = lines.finals.join(' ').slice(0, CLIENT_TURN_MAX_TEXT);
-        // The text is the turn's, not the line's: with the line's itemId, a detector
+        // A backchannel the detector would drop reaches it on its own, so the detector drops and reports it; joined
+        // with the turn's finals, it would be words of the turn.
+        if (!endpoint.isBackchannel?.(text)) {
+          // A turn's text stops growing at CLIENT_TURN_MAX_TEXT: later finals are left out.
+          if (lines.finals.join(' ').length < CLIENT_TURN_MAX_TEXT) lines.finals.push(text);
+          event.text = lines.finals.join(' ').slice(0, CLIENT_TURN_MAX_TEXT);
+        }
+        // The text is the turn's, or a lone backchannel's, not the line's: with the line's itemId, a detector
         // that keeps finals per item would join the turn's lines a second time.
         delete event.itemId;
       }
@@ -751,9 +823,9 @@ export class VoicePipelineOrchestrator extends EventEmitter {
    * Terminal stop. Call-profile cleanup rejects if its native fence or disposal is incomplete.
    *
    * Without a call profile the session moves to `'closed'` and emits `'close'` at once, then aborts the agent's
-   * request, closes the STT and TTS sessions, resets the endpoint detector and closes the transport, unless the
-   * transport has closed itself. The promise rejects when one of those throws. Safe to call more than once: a later
-   * call returns the first one's outcome.
+   * request, closes the STT and TTS sessions, resets the endpoint detector and removes the listeners the session added
+   * to it, and closes the transport, unless the transport has closed itself. The promise rejects when one of those
+   * throws. Safe to call more than once: a later call returns the first one's outcome.
    *
    * @param reason - Optional human-readable reason for diagnostics.
    */
@@ -773,6 +845,7 @@ export class VoicePipelineOrchestrator extends EventEmitter {
       () => this.stt?.close(),
       () => this.tts?.close(),
       () => this.endpoint?.reset(),
+      () => this._releaseEndpoint(),
       // A transport that closed itself is not closed again; the WebSocket transport would read 'closing' ever after.
       () => {
         if (transport && transport.state !== 'closed') transport.close(1000, reason);

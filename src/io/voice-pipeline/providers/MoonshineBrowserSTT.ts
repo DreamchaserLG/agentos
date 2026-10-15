@@ -59,6 +59,7 @@ import {
   type ProviderCapabilities,
 } from '../HealthyProvider.js';
 import { VoicePipelineError } from '../VoicePipelineError.js';
+import { describeReason } from '../describeReason.js';
 
 /** The optional peer this module runs on. */
 const MOONSHINE_WASM = '@moonshine-ai/moonshine-wasm';
@@ -252,7 +253,8 @@ export interface MoonshineWasmModule {
  *   specifier, as a browser gives for one it cannot resolve), otherwise the
  *   import's own message, as for a failed fetch of the module a page maps the
  *   package to, a syntax error or a refusal by the page's Content Security
- *   Policy.
+ *   Policy; a value `String()` cannot print (an object without a prototype,
+ *   a revoked proxy) is named by its type, `an unprintable object`.
  */
 export async function loadMoonshineWasm(
   importer: (specifier: string) => Promise<unknown> = (specifier) =>
@@ -263,7 +265,7 @@ export async function loadMoonshineWasm(
   } catch (err) {
     const message = isMissingModule(err)
       ? `${MOONSHINE_WASM} is required for the Moonshine browser speech-to-text provider. Install it: npm install ${MOONSHINE_WASM}`
-      : `${MOONSHINE_WASM} could not be imported for the Moonshine browser speech-to-text provider: ${err instanceof Error ? err.message : String(err)}`;
+      : `${MOONSHINE_WASM} could not be imported for the Moonshine browser speech-to-text provider: ${describeReason(err)}`;
     throw Object.assign(new Error(message), { cause: err });
   }
 }
@@ -279,11 +281,17 @@ const BARE_SPECIFIER_IN_MESSAGE = /(^|[^\w./@-])@moonshine-ai\/moonshine-wasm($|
  * Whether an import of the package failed because the package is not there:
  * Node's `ERR_MODULE_NOT_FOUND`, or a `TypeError` that names the package's bare
  * specifier, as a browser gives for one it cannot resolve. A failed fetch
- * names the URL it fetched instead, and is not taken for a missing package.
+ * names the URL it fetched instead, and is not taken for a missing package,
+ * nor is a value that refuses to be read: a revoked proxy throws on the read
+ * of its `code` and on `instanceof`.
  */
 function isMissingModule(err: unknown): boolean {
-  if ((err as { code?: unknown } | null | undefined)?.code === 'ERR_MODULE_NOT_FOUND') return true;
-  return err instanceof TypeError && BARE_SPECIFIER_IN_MESSAGE.test(err.message);
+  try {
+    if ((err as { code?: unknown } | null | undefined)?.code === 'ERR_MODULE_NOT_FOUND') return true;
+    return err instanceof TypeError && BARE_SPECIFIER_IN_MESSAGE.test(err.message);
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,7 +1064,10 @@ class MoonshineBrowserSession extends VoiceEventEmitter implements StreamingSTTS
    * except that a listener that throws is written as a console warning and
    * the listeners after it still run. `emit()` stops at a throw and throws
    * into its caller, which would leave the session's last events unsent: the
-   * rest of a close, or the close that follows a failure.
+   * rest of a close, or the close that follows a failure. The warning gives
+   * the throw's text from `describeReason()`, which names a value `String()`
+   * cannot print (an object without a prototype, a revoked proxy) by its
+   * type, where formatting it would throw from the warning itself.
    *
    * @param eventName - One of the session's last events.
    * @param args - What each listener is handed.
@@ -1066,10 +1077,7 @@ class MoonshineBrowserSession extends VoiceEventEmitter implements StreamingSTTS
       try {
         (listener as (...values: unknown[]) => unknown).apply(this, args);
       } catch (thrown) {
-        console.warn(
-          `[moonshine-browser-stt] a listener of '${eventName}' threw:`,
-          thrown instanceof Error ? thrown.message : String(thrown)
-        );
+        console.warn(`[moonshine-browser-stt] a listener of '${eventName}' threw:`, describeReason(thrown));
       }
     }
   }
