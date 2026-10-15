@@ -1,3 +1,9 @@
+## [0.13.140](https://github.com/framerslab/agentos/compare/v0.13.139...v0.13.140) (2026-10-15)
+
+### fix
+
+* **meetings:** deferred totals settled after the completion step, and an unknown mail outcome never retried (#487) ([c12654a](https://github.com/framerslab/agentos/commit/c12654a40bad8ccdf265f931c033f79175a80502))
+
 ## [0.13.139](https://github.com/framerslab/agentos/compare/v0.13.138...v0.13.139) (2026-10-15)
 
 ### fix
