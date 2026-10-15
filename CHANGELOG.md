@@ -1,3 +1,9 @@
+## [0.13.150](https://github.com/framerslab/agentos/compare/v0.13.149...v0.13.150) (2026-10-15)
+
+### fix
+
+* **voice-pipeline:** keep every turn and every barge-in word from transcribers whose finals come before their end of speech (#511) ([985103b](https://github.com/framerslab/agentos/commit/985103b432e182fefed387f8cca08cec83ed246b))
+
 ## [0.13.149](https://github.com/framerslab/agentos/compare/v0.13.148...v0.13.149) (2026-10-15)
 
 ### fix
