@@ -236,6 +236,15 @@ describe('VoicePipelineOrchestrator', () => {
     expect(orchestrator.state).toBe('idle');
   });
 
+  it('asks a transport that has readyForPlayback() to get ready as the session starts, and starts though that fails', async () => {
+    const readyForPlayback = vi.fn().mockRejectedValue(new Error('track not published'));
+    (transport as any).readyForPlayback = readyForPlayback;
+    await startSession();
+    expect(readyForPlayback).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+  });
+
   it('should transition to listening when startSession is called', async () => {
     await startSession();
     expect(orchestrator.state).toBe('listening');
@@ -322,6 +331,36 @@ describe('VoicePipelineOrchestrator', () => {
     expect(transport.sendControl).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'agent_done' }),
     );
+  });
+
+  it('stays SPEAKING after flush_complete until a transport that reports its playout has played the reply out, and ends a reply whose wait fails', async () => {
+    let played!: () => void;
+    let failed!: (error: Error) => void;
+    (transport as any).waitForPlayout = vi
+      .fn()
+      .mockReturnValueOnce(new Promise<void>((resolve) => { played = resolve; }))
+      .mockReturnValueOnce(new Promise<void>((_resolve, reject) => { failed = reject; }));
+    await startSession();
+    endpoint.emit('turn_complete', makeTurnComplete());
+    await vi.advanceTimersByTimeAsync(0);
+
+    ttsSession.emit('flush_complete');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('speaking');
+    expect(transport.sendControl).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'agent_done' }));
+    played();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+    expect(transport.sendControl).toHaveBeenLastCalledWith({ type: 'agent_done', text: 'Hello world', durationMs: 0 });
+
+    // A wait that rejects ends the reply as one that resolves: the transport can no longer say when its audio stops.
+    endpoint.emit('turn_complete', makeTurnComplete());
+    await vi.advanceTimersByTimeAsync(0);
+    ttsSession.emit('flush_complete');
+    failed(new Error('track closed'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(orchestrator.state).toBe('listening');
+    expect(transport.sendControl).toHaveBeenCalledTimes(6); // agent_thinking, agent_speaking and agent_done, twice
   });
 
   /**
