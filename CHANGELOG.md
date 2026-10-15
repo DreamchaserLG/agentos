@@ -1,3 +1,9 @@
+## [0.13.136](https://github.com/framerslab/agentos/compare/v0.13.135...v0.13.136) (2026-10-15)
+
+### feat
+
+* **claims:** persistence evidence and its privacy result union (#478) ([3d54db1](https://github.com/framerslab/agentos/commit/3d54db1e58bea87a88ae3f5b0ed39d794403a858))
+
 ## [0.13.135](https://github.com/framerslab/agentos/compare/v0.13.134...v0.13.135) (2026-10-14)
 
 ### fix
