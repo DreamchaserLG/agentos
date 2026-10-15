@@ -1,3 +1,9 @@
+## [0.13.139](https://github.com/framerslab/agentos/compare/v0.13.138...v0.13.139) (2026-10-15)
+
+### fix
+
+* **voice-pipeline:** answer a question with one word, recognize backchannels the same for every provider, release a detector's listeners at stop, describe an unprintable listener throw (#484) ([9b00a41](https://github.com/framerslab/agentos/commit/9b00a410435ecc6e23827d0fb1a1954e7c01c48f))
+
 ## [0.13.138](https://github.com/framerslab/agentos/compare/v0.13.137...v0.13.138) (2026-10-15)
 
 ### feat
