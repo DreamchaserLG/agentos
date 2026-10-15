@@ -650,6 +650,166 @@ Deepgram opens with the language `sttLanguageOptions()` gives its entry ([Hosted
 
 Deepgram's `usageIntervalMs` defaults to zero for one final report; a positive value adds cumulative reports while the connection is open. Its final report is emitted once across explicit close, remote close and failed upgrade cleanup. Configure `mipOptOut: true` to send `mip_opt_out=true`; a per-session false value cannot undo that setting. These changes preserve the general-purpose library's existing opt-out and failover defaults. Hosts that require those policies set them explicitly.
 
+## Supplier usage evidence
+
+```typescript
+import {
+  readDeepgramUsage,
+  DeepgramUsageReadError,
+  type DeepgramUsageContract,
+} from '@framers/agentos/io/voice-pipeline';
+
+// The host's own verified record of its account's billing behavior; the library does not certify it.
+declare const contract: DeepgramUsageContract;
+const nowMs = Date.now();
+try {
+  const evidence = await readDeepgramUsage({
+    projectId: process.env.DEEPGRAM_PROJECT_ID!,
+    apiKey: process.env.DEEPGRAM_USAGE_KEY!, // server-side only; never stored with the evidence
+    fromMs: baselineMs, // a whole second, less than 90 days before nowMs
+    throughMs: Math.floor((nowMs - contract.maxReportingLagMs) / 1000) * 1000,
+    nowMs,
+    contract,
+  });
+  await reconcileSupplierUsage(evidence); // evidence.costMicro and one row per request
+} catch (error) {
+  if (!(error instanceof DeepgramUsageReadError)) throw error;
+  recordFailedCheck(error.code); // keep the last successful result; a failure is never zero usage
+}
+```
+
+`readDeepgramUsage()` ([`DeepgramUsage.ts`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/providers/DeepgramUsage.ts)) reads the project's request-cost records from [List Project Requests](https://developers.deepgram.com/reference/manage/requests/list), whose response example includes `response.details.usd`; the [Logs & Usage guide](https://developers.deepgram.com/docs/using-logs-usage) names that field as the request's cost in US dollars. The deprecated [project usage response](https://developers.deepgram.com/reference/manage/usage/get) documents no monetary totals, and the [usage breakdown](https://developers.deepgram.com/reference/manage/usage/breakdown/get) documents quantities. These references were read on 15 October 2026. A quantity aggregate is not a monetary balance.
+
+Before using the reader to support supplier credit, the host supplies a dated `DeepgramUsageContract` verified against its billing arrangement: complete project scope, costs covering all request categories and privacy settings, timestamp boundaries, pagination and a maximum final-cost reporting delay. The contract has an evidence version and a validity end. The type does not certify those facts. Deepgram publishes no bound on that delay: its guide describes requests whose response is not recorded yet as pending and says to give them time. No verified delay means no usable contract. The interval must end at least that far behind the check time.
+
+The reader enumerates every request without vendor-model, endpoint, status or key filters, rejects missing costs and incomplete responses, rounds each nonnegative USD amount upward to a micro-dollar and checks two complete traversals for agreement. HTTP redirects, duplicate request ids, shifted pages, changed costs, a timeout or a page/response-size limit all fail the check, with a fixed `code` on `DeepgramUsageReadError` and no response content. A record listed before its response or cost is recorded fails the check too; the guide's own example lists a request with `"response": null`. The returned evidence contains request identities, times and costs only. Neither a balance response nor a missing field becomes zero.
+
+The reader sends the interval as `YYYY-MM-DDTHH:MM:SS+00:00`, one of the forms the endpoint documents, so `fromMs` and `throughMs` fall on whole seconds, and `throughMs` is inclusive. Deepgram keeps request logs readable for 90 days, so an interval that starts 90 days or more before the check is refused instead of read short; a host that reconciles over a longer period stores each interval's evidence before it ages out.
+
+Two identical reads detect some pagination changes; they do not establish reporting completeness. A host still bounds spending after the evidence interval with reservations, retains unreconciled local liabilities and refuses credit when external spending escapes that boundary. Take a new console baseline only after previous requests have drained or have positive fencing evidence. Deepgram attaches promotional credit to an account's first project ([Managing Projects](https://developers.deepgram.com/guides/deep-dives/managing-projects)); if credit spans several projects, collect and reconcile all their costs before using it, since a single-project result is insufficient.
+
+The output's `costMicro` is supplier usage evidence, not a customer charge or a prepaid mark, and the reader decides no coverage. `refreshTranscriptionCredit()` ([Supplier credit allocation](#supplier-credit-allocation)) binds the evidence to its current funding-record version and reconciles coverage per request. Never mark all requests from one vendor prepaid merely because that vendor once had a promotional credit.
+
+## Supplier credit allocation
+
+```typescript
+import {
+  admitLowestCostTranscription,
+  bindTranscriptionConnection,
+  settleTranscriptionInterval,
+  SqlCompoundCreditStore,
+} from '@framers/agentos/safety/runtime';
+
+// Supplier promotions under a table prefix of their own, apart from customer credit.
+const supplier = new SqlCompoundCreditStore({ db, tablePrefix: 'supplier_credit' });
+await supplier.ensureSchema(); // or the host's migration of compoundCreditDdl('supplier_credit')
+const scopeId = 'deepgram-promotion';
+
+// Admission selects an entry and reserves its whole estimate in the host's own transaction, before any audio.
+const admission = await db.transaction(async (trx) => {
+  const admitted = await supplier.withStorageTransaction(trx, (t) => admitLowestCostTranscription(t, {
+    scopeId, reservationId: sessionId, entries, prices, availableVendors: ['deepgram', 'openai'],
+    estimatedSeconds: 3_600, creditVersion: record.version, at: Date.now(),
+  }));
+  await saveSession(trx, sessionId, admitted); // with the host's gross spend reservation
+  return admitted;
+});
+const entry = admission.selection.serving;
+
+// The first socket claims that reservation before its audio.
+await db.transaction((trx) => supplier.withStorageTransaction(trx, (t) =>
+  bindTranscriptionConnection(t, { scopeId, reservationId: sessionId, connectionId, entry, at: Date.now() })));
+
+// Each cumulative usage report settles once by its id: this interval's list price and how it was funded.
+const receipt = await db.transaction((trx) => supplier.withStorageTransaction(trx, (t) =>
+  settleTranscriptionInterval(t, {
+    scopeId, reservationId: sessionId, connectionId, entry,
+    reportId: `${connectionId}:${usage.audioSeconds}:${usage.final}`,
+    audioSeconds: usage.audioSeconds, final: usage.final, supplierRequestId: usage.supplierRequestId, at: Date.now(),
+  })));
+// receipt.grossMicro === receipt.prepaidMicro + receipt.chargedMicro
+```
+
+The Node entry `@framers/agentos/safety/runtime` exports an allocator for a supplier's promotional transcription credit ([`TranscriptionCredit.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/TranscriptionCredit.ts)) over `CreditTransaction`. Keep supplier promotions under a `SqlCompoundCreditStore` table prefix of their own, separate from customer credit and supplier-day accounting, with one scope per promotional pool. The allocator reuses the native accounts, lots, holds, allocations and immutable entries, and adds compare-and-set documents for the funding record, each reservation's cumulative state and each interval's receipt. `SqlCompoundCreditStore` keeps them in a `documents` table: `ensureSchema()` adds it to an existing store, and a host that runs its own migrations adds it from `compoundCreditDdl(prefix)`. A third-party store implements the optional `getDocument` and `putDocument` before it can serve the allocator, which refuses a store without them; every other credit operation keeps its interface.
+
+`makeTranscriptionCreditRecord` binds the vendor, the console amount in whole micro-dollars, its exact read instant, the project, the verified usage contract and the expiry into an immutable version. `configureTranscriptionCredit` activates that record unchecked, or disables credit with `record: null`. No credit is usable before `refreshTranscriptionCredit` accepts usage evidence for that version. `failTranscriptionCreditCheck` counts at most one failed check per UTC day, and a successful refresh clears the count. Allocation stops at three failed days, at a check 24 hours old, at the record's expiry and when the record is disabled. Disabling or replacing a record never changes a committed receipt.
+
+The host verifies the usage reader's contract ([Supplier usage evidence](#supplier-usage-evidence)). Every Deepgram reservation counts against the credit until its final report, whatever its promotional hold: the part of its gross estimate not yet measured stays outstanding, and its measured usage stays deducted as local cost. That includes sockets admitted before a successful check and explicit sockets that hold no credit; neither a refresh nor a released hold erases either amount. Measured Deepgram usage carries the socket's `supplierRequestId`, which the allocator binds to one reservation. Evidence that lists that finished request reconciles it exactly once: its supplier cost counts through the reported total, and its local list-price cost leaves the deduction. Until then local costs stay deducted on top of the supplier's high-water total, so the allocator can exhaust its conservative headroom before the supplier's console does; it never returns that uncertainty to the free pool. A new console baseline requires admissions to pause, every reservation to settle, and positive stop evidence (`baselineFence`) observed before the console read. The host fences any spending outside the allocator as well. A disabled version cannot be reactivated; a new console reading makes a new version.
+
+Call `admitLowestCostTranscription` in the same transaction as the host's admission. It reads the checked snapshot, selects with `selectLowestCostSttEntry()` ([Hosted transcription cost selection](#hosted-transcription-cost-selection)) and reserves the estimate before the transaction commits; a retry with the same inputs answers the same admission. `bindTranscriptionConnection` claims that reservation for the first socket's `connectionId`. Every reconnect, rollover or fallback calls `reserveTranscriptionCredit` for its own entry and binds its own `connectionId` before audio. A named-vendor policy calls `reserveTranscriptionCredit` directly and never widens its permitted chain. Without an available promotional balance the reservation holds zero promotional dollars, which neither authorizes gross supplier spending nor waives the host's customer budget.
+
+`settleTranscriptionInterval` takes authenticated cumulative measured seconds and a durable report id. It prices the difference between cumulative list-price totals, so periodic reports never round the same audio twice. A repeated report answers its stored receipt; a changed retry, a smaller total and a report after the final one are refused. `grossMicro`, `prepaidMicro` and `chargedMicro` describe that interval alone. An interval that crosses the last covered micro-dollar carries both amounts, so neither a vendor nor a session is marked prepaid as a whole. Exhausted credit, stale evidence or a disabled record leave later usage charged even when the session started with credit.
+
+Only a final report releases unused credit. A missing worker heartbeat or an expired lease is not evidence of zero usage: keep the hold until the host has positive termination evidence and a measured or conservative upper-bound total. A reservation that was committed but provably never opened is bound to a recovery identity and settled with a final zero. Keep these dedicated supplier holds out of `reconcileCompoundCredit` and `settleCompoundCredit`.
+
+Take the supplier scope before any customer account lock, in admission, settlement and reconciliation alike. `SqlCompoundCreditStore.withStorageTransaction(transaction, callback)` binds these rows to the host's open adapter transaction without beginning, committing or retrying one; the schema must already exist. Retry the whole host transaction on a `CreditConflictError`, test a cancelled authorization before commit, and make no provider request while the transaction holds its locks. Promotional accounting and the host's full gross spend reservation commit or roll back together.
+
+### Text funding by elapsed time
+
+```typescript
+import {
+  createTimedTextBudget,
+  renewTimedTextBudget,
+  reportTimedTextBudget,
+  settleTimedTextBudget,
+} from '@framers/agentos/safety/runtime';
+
+// At admission, before the first text request; the first part is the session's initial reservation.
+await createTimedTextBudget(t, { scopeId, budgetId: sessionId, at: startedAt, sliceMs: 3_600_000,
+  partMicro: textPartMicro, initialReservationId });
+// After each request on the session's one serialized text lane.
+await reportTimedTextBudget(t, scopeId, sessionId, cumulativeTextMicro);
+// At each hour boundary, once the host has checked the session's current allowance.
+await renewTimedTextBudget(t, { scopeId, budgetId: sessionId, at: Date.now(), cumulativeMicro: cumulativeTextMicro,
+  allowed }, (micro, expiresAtMs) => spend.reserve(micro, expiresAtMs));
+// At the session's end: each part settles once, the first with the initial audio.
+await settleTimedTextBudget(t, { scopeId, budgetId: sessionId, initialAudioMicro },
+  (reservationId, grossMicro) => spend.settle(reservationId, grossMicro));
+```
+
+[`TimedTextBudget.ts`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/TimedTextBudget.ts) funds a listening session's text by elapsed time, apart from its transcription sockets: reconnects, rollovers and fallbacks never touch it. A part of `partMicro` funds each `sliceMs` from the session's start. `renewTimedTextBudget` reserves the next part through the host's callback once its boundary has passed and `allowed` is true, once per slice: a renewal before the first boundary is refused, and a repeat within a slice reserves nothing. A refused allowance throws before any reservation, so the session stops before more text. Report text cost cumulatively from one serialized text lane, and drain that lane's in-flight request before renewing. `settleTimedTextBudget` settles each part once, at most its `partMicro` of text, the first combined with the initial audio; a second call changes nothing. The state is one document in the host's credit transaction, under the locks the host already holds.
+
+## Hosted transcription integration
+
+```typescript
+import { selectLowestCostSttEntry, type SttPriceRow } from '@framers/agentos/safety/runtime';
+
+// Synthetic prices and no credit; a host uses its verified tariff rows.
+const prices: SttPriceRow[] = [
+  { entry: 'deepgram:nova-3', microPerMinute: 4_800 },
+  { entry: 'openai:gpt-4o-mini-transcribe', microPerMinute: 3_000 },
+];
+const selection = selectLowestCostSttEntry(prices.map((row) => row.entry), prices, {
+  availableVendors: ['deepgram', 'openai'],
+  nowMs: Date.UTC(2026, 9, 14),
+  estimatedSeconds: 60,
+});
+// selection.serving is openai:gpt-4o-mini-transcribe; its fallback is deepgram:nova-3.
+// The host still authorizes both policy and spend before opening either socket.
+```
+
+`@framers/agentos/io/voice-pipeline` serves provider construction, provider policy, connection hooks and the Deepgram usage reader. Server admission and accounting import the pure selector, the transcription price readers, the credit operations and the SQL store from `@framers/agentos/safety/runtime`, which loads no audio provider. Both entries export the same `selectLowestCostSttEntry` and `sttLanguageOptions`. Selection reads no environment variable or credential.
+
+| Boundary | API | Host responsibility |
+|---|---|---|
+| Price lookup | `deepgramStreamingPricing`, `deepgramPreRecordedPricing`, `openAITranscriptionPricing` | Choose the verified tariff for the actual model and request mode; a missing row is an error, never a free request |
+| Pure order | `selectLowestCostSttEntry`, `sttLanguageOptions` | Supply the offered entries, the vendors actually available, their prices and the current version-bound credit snapshot |
+| Atomic admission | `admitLowestCostTranscription` | Persist the chosen chain and the ordinary gross spend reservation in the same transaction |
+| Named vendor | `reserveTranscriptionCredit` | Keep a single-vendor chain and reserve gross spend separately |
+| Socket opening | `SttConnectionHooks.authorize`, `bindTranscriptionConnection` | Bind the actual entry and connection UUID before audio; reserve separately for every reconnect, rollover and fallback socket |
+| Usage | `SttMeasuredUsageEvent`, `settleTranscriptionInterval` | Queue each cumulative report durably and settle it once; keep each interval's entry, seconds and prepaid and charged amounts |
+| Supplier evidence | `readDeepgramUsage`, `refreshTranscriptionCredit` | Verify complete scope and cost semantics, the reporting delay and the credit's validity before using the evidence |
+| Failed check | `failTranscriptionCreditCheck` | Record every failed check; one failure counts per UTC day, and stale or failed evidence is never shown as current |
+| Configuration | `makeTranscriptionCreditRecord`, `configureTranscriptionCredit` | Validate the complete funding record; a missing or partial record authorizes no credit |
+| Text funding | `createTimedTextBudget`, `renewTimedTextBudget`, `settleTimedTextBudget` | Reserve each slice's text part through the host's spend adapter once its allowance is checked |
+| Database transaction | `SqlCompoundCreditStore.withStorageTransaction` | Pass the open adapter transaction and keep one commit and rollback boundary |
+
+For an explicit named-vendor choice, offer only that vendor and leave cross-vendor failover off. Resolve a private device choice with the host's device policy before hosted selection; a failed device preparation never turns it into a hosted session. For a lowest-cost hosted chain, set `enableMidUtteranceFailover: true` on the chain and give each vendor its own key. Configure Deepgram with `mipOptOut: true`, the actual `inputSampleRate` and, when periodic settlement is needed, a positive `usageIntervalMs`. Selection is fixed at admission: changed prices or credit apply to later sessions.
+
+The selector's zero effective price is an admission estimate, not a prepaid receipt; only an interval's allocation marks usage prepaid. Replayed and overlapping audio is measured on every socket that receives it. Customer allowances, derived-text processing, provider availability, consent controls and product copy stay host policies.
+
+The `Transcription package` workflow ([`transcription-package.yml`](https://github.com/framerslab/agentos/blob/master/.github/workflows/transcription-package.yml)) installs the packed package into an empty project and runs [`transcription-consumer.ts`](https://github.com/framerslab/agentos/blob/master/scripts/fixtures/transcription-consumer.ts) against it with network access refused. The consumer compiles against the installed declarations and exercises the selector from both entries, the price readers, credit configuration and refresh, two simultaneous admissions over one credited minute, a split prepaid and charged receipt and time-based text funding. A run dispatched on a release tag downloads that version from the registry, matches its tarball to the registry's integrity and runs the same consumer. It calls no speech provider; wire behavior, sample-rate conversion and database concurrency are covered by the source suites in CI.
+
 ## Call profile
 
 `overrides.callProfile` ([`CallPipelineProfile`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/VoicePipelineOrchestrator.ts)) runs the session as one scoped call. `startSession()` then returns the call's own session and reads neither `endpointDetector` nor `bargeinHandler`. It throws when the config sets `diarization: true`, when the agent session has no `abort()`, when `minSpeechMs`, `maxTextCharacters` or `maxSynthesisRequests` is not a positive safe integer, and when the transport lacks `waitForPlayback()` and `clearPlayback()` ([`IPlaybackTransport`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)). `LiveKitStreamTransport` has both and speaks only with its `publisher` option ([Speaking in the room](#speaking-in-the-room)); without it, the first reply's send rejects and fails the call. An STT session without `pushAudioScoped()` and `reset()` ([`ScopedStreamingSTTSession`](https://github.com/framerslab/agentos/blob/master/src/io/voice-pipeline/types.ts)) closes the call, and `startSession()` rejects.
