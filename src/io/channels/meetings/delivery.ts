@@ -63,6 +63,21 @@ export interface DeliveryDestination {
   secret: string;
 }
 
+/** What a host's mail send answers for one mail delivery. */
+export type MailOutcome =
+  | { outcome: 'sent' }
+  /** A refusal no retry can change: the delivery ends dead. */
+  | { outcome: 'dead' }
+  /** The destination may have acted but never answered (a sender that takes no idempotency key): the delivery ends dead, never tried again, and the warning says `unknown`, so the host looks before it sends again. */
+  | { outcome: 'unknown' }
+  /** A failure of the moment: the outbox's backoff. */
+  | { outcome: 'retry' }
+  /** A cap that holds the mail: the delivery's next attempt moves to `notBefore` and no attempt is counted. */
+  | { outcome: 'hold'; notBefore: number };
+
+/** Sends one mail delivery as the host does (the unseal, its checks, the send) and answers its outcome; a throw counts as `retry`. */
+export type MailSend = (delivery: OutboxDelivery, signal: AbortSignal) => Promise<MailOutcome>;
+
 /**
  * The default send: the checked egress module's hosted profile (https on 443 to a name whose every address is public,
  * the connection its own and pinned to the checked address, TLS validating the name), no redirect followed (a 3xx is
@@ -130,6 +145,8 @@ export interface OutboxDispatcherOptions {
   resolve: (destinationRef: string) => Promise<DeliveryDestination | undefined>;
   /** How each delivery is posted; {@link httpsSend} when absent. */
   send?: DeliverySend;
+  /** Sends a delivery of kind `mail`; absent, such a delivery fails for its backoff and the warning names it. */
+  mail?: MailSend;
   /** The envelope's header names; the library's defaults when absent. */
   names?: EnvelopeHeaderNames;
   /** What is due, and the envelope's timestamp, by this clock; the wall clock when absent. */
@@ -175,7 +192,15 @@ export class OutboxDispatcher {
   async deliverDue(): Promise<{ delivered: number; failed: number }> {
     let delivered = 0;
     let failed = 0;
+    // an expired mail waits for no attempt: ended first, its body emptied, where the outbox can
+    await this.options.outbox.endExpired?.(this.now());
     for (const d of await this.options.outbox.due(this.now(), this.options.batch ?? 50)) {
+      if (d.kind === 'mail') {
+        const outcome = await this.sendMail(d);
+        if (outcome === 'delivered') delivered += 1;
+        else if (outcome === 'failed') failed += 1;
+        continue;
+      }
       const destination = await this.destinationOf(d);
       if (!destination) {
         await this.options.outbox.markFailed(d.id, this.now());
@@ -210,5 +235,75 @@ export class OutboxDispatcher {
       failed += 1;
     }
     return { delivered, failed };
+  }
+
+  /**
+   * One mail delivery through the host's send, under the outbox's claim when it has one; the outcome recorded as the
+   * host answered it (`dead` and `hold` through the outbox's own methods where it has them, else as a failed attempt).
+   * Skipped when the claim found the delivery gone, no longer pending, being sent already or cancelled by a purge.
+   */
+  private async sendMail(d: OutboxDelivery): Promise<'delivered' | 'failed' | 'held' | 'skipped'> {
+    const mail = this.options.mail;
+    const outbox = this.options.outbox;
+    if (!mail) {
+      this.options.logger?.warn(`[OutboxDispatcher] ${d.id}: no mail send`);
+      await outbox.markFailed(d.id, this.now());
+      return 'failed';
+    }
+    // The outcome is recorded inside the claim, before it is released, so a second pass cannot take the row while a
+    // durable record of this pass's send is still being written; a delivery that expired since `due` returned it is
+    // ended without a send. Held on an object: an assignment inside the closure is not seen by a plain variable's narrowing.
+    const held: { result: 'delivered' | 'failed' | 'held' } = { result: 'failed' };
+    const deliver = async (fresh: OutboxDelivery, signal: AbortSignal): Promise<void> => {
+      signal.throwIfAborted();
+      if (fresh.expiresAt !== undefined && this.now() >= fresh.expiresAt) {
+        await this.endDead(fresh.id);
+        held.result = 'failed';
+        return;
+      }
+      const answer = await mail(fresh, signal);
+      signal.throwIfAborted();
+      held.result = await this.record(fresh.id, answer);
+    };
+    try {
+      const claimed = outbox.sendClaimed;
+      if (claimed) {
+        if (!(await claimed.call(outbox, d, deliver))) return 'skipped';
+      } else await deliver(d, new AbortController().signal);
+    } catch (err) {
+      this.options.logger?.warn(`[OutboxDispatcher] ${d.id}: ${err instanceof Error ? err.name : 'error'}`);
+      await outbox.markFailed(d.id, this.now());
+      return 'failed';
+    }
+    return held.result;
+  }
+
+  /** Records a mail's outcome: delivered, dead at once (a refusal, or an outcome never answered), held until a time, or a failed attempt for the backoff. */
+  private async record(id: string, answer: MailOutcome): Promise<'delivered' | 'failed' | 'held'> {
+    const outbox = this.options.outbox;
+    switch (answer.outcome) {
+      case 'sent':
+        await outbox.markDelivered(id);
+        return 'delivered';
+      case 'dead':
+        await this.endDead(id);
+        return 'failed';
+      case 'unknown':
+        this.options.logger?.warn(`[OutboxDispatcher] ${id}: outcome unknown`);
+        await this.endDead(id);
+        return 'failed';
+      case 'hold':
+        if (!outbox.holdUntil || !(await outbox.holdUntil(id, answer.notBefore))) await outbox.markFailed(id, this.now());
+        return 'held';
+      default:
+        await outbox.markFailed(id, this.now());
+        return 'failed';
+    }
+  }
+
+  /** Ends a delivery at once where the outbox can, else as a failed attempt. */
+  private async endDead(id: string): Promise<void> {
+    const outbox = this.options.outbox;
+    if (!outbox.markDead || !(await outbox.markDead(id))) await outbox.markFailed(id, this.now());
   }
 }
