@@ -1,3 +1,9 @@
+## [0.13.137](https://github.com/framerslab/agentos/compare/v0.13.136...v0.13.137) (2026-10-15)
+
+### fix
+
+* **voice-pipeline:** pipeline seam review fixes (#479) ([645e9ec](https://github.com/framerslab/agentos/commit/645e9ec15904ee2c1f13f4ba75b8576717f8722a))
+
 ## [0.13.136](https://github.com/framerslab/agentos/compare/v0.13.135...v0.13.136) (2026-10-15)
 
 ### feat
