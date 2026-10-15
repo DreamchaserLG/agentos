@@ -1,3 +1,10 @@
+## [0.13.138](https://github.com/framerslab/agentos/compare/v0.13.137...v0.13.138) (2026-10-15)
+
+### feat
+
+* **claims:** an analytics transport verifier (#482) ([17c3475](https://github.com/framerslab/agentos/commit/17c34758b80d94af4602be04591cdf5a1cad2499))
+* **meetings:** a completion hook before the scrub, and mail deliveries in the outbox (#486) ([a36744b](https://github.com/framerslab/agentos/commit/a36744bca6b332a602c86547ccefe83ad59f8a8a))
+
 ## [0.13.137](https://github.com/framerslab/agentos/compare/v0.13.136...v0.13.137) (2026-10-15)
 
 ### fix
