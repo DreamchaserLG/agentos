@@ -34,7 +34,7 @@ import type { AgentOSUsageLedgerOptions } from './usageLedger.js';
 import type { LateAttemptUsage } from './completionGateway.js';
 import { costOfUsageUSD, type SpendBudget } from './spendBudget.js';
 import type { ApprovalGateFn } from './approval-gate.js';
-import type { ToolCallHook } from './agencyLaunch/types.js';
+import type { AgencyLaunchFrame, ToolCallHook } from './agencyLaunch/types.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 
@@ -76,6 +76,8 @@ export interface GmiTurnOptions {
   toolNames?: ReadonlySet<string>;
   /** The launching turn's onBeforeToolExecution hooks, run before the agent's own. */
   toolHooks?: readonly ToolCallHook[];
+  /** A launched team's seat: the launch its team comes from, which a launch from the turn's tool calls nests under. */
+  launchFrame?: AgencyLaunchFrame;
   /**
    * Checks the reply of a turn that ended without error, before the session
    * keeps it. A throw keeps nothing of the turn (no history, no
@@ -111,6 +113,10 @@ export interface GmiTurnContext {
   toolHooks?: readonly ToolCallHook[];
   /** The explicit user id the session named; undefined when it named none. */
   providerUserId?: string;
+  /** The turn's stop ({@link GmiTurnOptions.abortSignal}): every tool call of the turn carries it. */
+  abortSignal?: AbortSignal;
+  /** A seat's frame ({@link GmiTurnOptions.launchFrame}): every tool call of the turn carries it in `sessionData.agencyLaunch`. */
+  launchFrame?: AgencyLaunchFrame;
 }
 
 /** The GMI that serves one turn. */
@@ -364,6 +370,8 @@ export async function* runGmiTurn(
       toolNames: turn.toolNames,
       toolHooks: turn.toolHooks,
       providerUserId: deps.providerUserId,
+      abortSignal: turn.abortSignal,
+      launchFrame: turn.launchFrame,
       // The bill a provider reports for a call this turn stopped (close() during
       // the call) arrives after the turn has ended: it is metered, counted and
       // charged to the turn's budget as a failed attempt's, as a billed failure

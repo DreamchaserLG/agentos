@@ -39,7 +39,8 @@ import { GatewayProviderManager } from './runtime/gatewayProviderManager.js';
 import { asSpendBudget, assertCallWithinBudget, promptCharsOf, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
 import { adaptTools } from './runtime/toolAdapter.js';
 import { withMembers } from './runtime/withMembers.js';
-import type { CallerTurnContext, ToolCallHook } from './runtime/agencyLaunch/types.js';
+import { LAUNCH_AGENCY_TOOL_NAME, resolveLaunchLimits, type AgencyLaunchFrame, type CallerTurnContext, type ToolCallHook } from './runtime/agencyLaunch/types.js';
+import { createGmiLaunchTool } from './runtime/agencyLaunch/gmiLaunchTool.js';
 import { resolveCognition, type ResolvedCognition } from './runtime/gmiCognition.js';
 import { personaFromAgentOptions } from './runtime/gmiPersona.js';
 import { modelNamesAnotherProvider } from './runtime/credentialOwner.js';
@@ -161,7 +162,9 @@ function skippedCall(req: ToolCallRequest, reason: string): ToolCallResult {
  * was built with, is then asked about a tool the orchestrator has, with the arguments the hooks left; anything but the
  * exact approval skips the tool, and the model is told why. Every call passed on carries `callerTurn`: the gate, the
  * budget, the explicit user, the names, the hooks (the carried ones, then the agent's) and this view's own
- * `processToolCall`, through which the step gate runs each step of a composed tool.
+ * `processToolCall`, through which the step gate runs each step of a composed tool. It carries the turn's stop too, so
+ * a call whose turn stopped while its hooks or its approval ran is refused (`STEP_ABORTED`) and nothing runs, and a
+ * seat's call carries the seat's frame (`sessionData.agencyLaunch`), which a launch from it nests under.
  */
 function hookTools(
   base: IToolOrchestrator,
@@ -205,7 +208,16 @@ function hookTools(
       toolHooks: hooks,
       dispatch: processToolCall,
     };
-    return base.processToolCall({ ...details, toolCallRequest: { ...req, arguments: args }, callerTurn });
+    // The turn's stop, with the call's own when it has one (a composed tool's step).
+    const stop = turn.abortSignal;
+    const signal = stop && details.signal ? AbortSignal.any([details.signal, stop]) : (stop ?? details.signal);
+    return base.processToolCall({
+      ...details,
+      toolCallRequest: { ...req, arguments: args },
+      ...(signal ? { signal } : {}),
+      ...(turn.launchFrame ? { sessionData: { ...(details.sessionData ?? {}), agencyLaunch: turn.launchFrame } } : {}),
+      callerTurn,
+    });
   };
   return withMembers(base, {
     processToolCall,
@@ -322,17 +334,23 @@ interface SeatSendKeys {
   __approvalGate?: ApprovalGateFn;
   __toolNames?: ReadonlySet<string>;
   __toolHooks?: readonly ToolCallHook[];
+  __launchFrame?: AgencyLaunchFrame;
 }
 
 /** The turn options a seat's send carries. */
-function seatTurnOf(sendOpts: unknown): Pick<GmiTurnOptions, 'approvalGate' | 'toolNames' | 'toolHooks'> {
+function seatTurnOf(sendOpts: unknown): Pick<GmiTurnOptions, 'approvalGate' | 'toolNames' | 'toolHooks' | 'launchFrame'> {
   const keys = (sendOpts ?? {}) as SeatSendKeys;
   // A gate that is present but not a function refuses every tool, as a gate received from a parent agency does.
   const gate = composeReceivedGate(keys.__approvalGate);
+  const frame = keys.__launchFrame;
   return {
     ...(gate ? { approvalGate: gate } : {}),
     ...(keys.__toolNames instanceof Set ? { toolNames: keys.__toolNames } : {}),
     ...(Array.isArray(keys.__toolHooks) ? { toolHooks: keys.__toolHooks } : {}),
+    // A launched team's seat: the frame its turn's calls carry, copied as the send gave it.
+    ...(frame && typeof frame.launchId === 'string' && typeof frame.role === 'string' && typeof frame.depth === 'number'
+      ? { launchFrame: { launchId: frame.launchId, role: frame.role, depth: frame.depth } }
+      : {}),
   };
 }
 
@@ -370,6 +388,10 @@ function hostLoopsOf(cognition: ResolvedCognition): Partial<Record<HostLoopName,
  *   does not resolve, or a dimension that is not a positive integer or not known.
  *   No environment is read here: the provider and model resolve on the first
  *   call, which rejects with the error `agent()` gives when nothing resolves.
+ * @throws {RangeError} At construction, naming the field: an `agencies` bound
+ *   outside its range, or an `agencies.members` value that is not a gmi() agent.
+ * @throws {AgencyConfigError} At construction: `agencies.hitl` approvals with no handler.
+ * @throws {Error} At construction: `agencies.launch` beside a tool of its own named `launch_agency`.
  */
 export function gmi(opts: GmiOptions): GmiHandle {
   for (const key of UNSUPPORTED_ON_GMI) {
@@ -401,10 +423,19 @@ export function gmi(opts: GmiOptions): GmiHandle {
   if (cognition.memory && opts.memoryProvider?.getContext) {
     console.warn('[agentos] gmi(): cognitive memory supplies the memory context; memoryProvider.getContext is skipped (observe still runs).');
   }
+  const ledger = mergeLedger((opts.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? opts.usageLedger);
+  // `agencies`: every bound is checked here, `launch` on or off.
+  const launchLimits = opts.agencies ? resolveLaunchLimits(opts.agencies) : undefined;
   const tools: ITool[] = adaptTools(opts.tools);
+  // With `agencies.launch`, launch_agency is one of the agent's tools: its persona lists it and its orchestrator runs it.
+  if (launchLimits && opts.agencies?.launch === true) {
+    if (tools.some((tool) => tool.name === LAUNCH_AGENCY_TOOL_NAME)) {
+      throw new Error(`gmi(): agencies.launch registers '${LAUNCH_AGENCY_TOOL_NAME}', and the agent's tools already hold a tool of that name.`);
+    }
+    tools.push(createGmiLaunchTool({ opts, limits: launchLimits, tools: () => tools, ledger, createAgent: gmi }));
+  }
   // Put first in the system prompt of every call that offers tools, as generateText puts it.
   const chainOfThought = tools.length > 0 ? resolveChainOfThought(opts.chainOfThought ?? true) : undefined;
-  const ledger = mergeLedger((opts.observability?.usageLedger as AgentOSUsageLedgerOptions | undefined) ?? opts.usageLedger);
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
   const gateway = gatewayFor(opts);
   // One budget for the agent, as agent() keeps one: every turn with no budget of its own is checked against it.

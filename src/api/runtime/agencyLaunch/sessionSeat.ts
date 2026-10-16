@@ -120,8 +120,12 @@ function seatError(name: string, code: string | undefined): Error {
   return error;
 }
 
-/** The persona description gmi() gives an agent: the first line of its instructions, else its name. */
-function descriptionOf(config: { instructions?: string; name?: string }): string | undefined {
+/**
+ * The persona description gmi() gives an agent: the first line of its instructions, else its name.
+ *
+ * @internal
+ */
+export function descriptionOf(config: { instructions?: string; name?: string }): string | undefined {
   return config.instructions?.split('\n').map((line) => line.trim()).find(Boolean) ?? (config.name?.trim() || undefined);
 }
 

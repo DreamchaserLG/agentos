@@ -38,6 +38,7 @@ import type { SkillEntry } from '../cognition/skills/types.js';
 import { loadSoulSync, parseSoul } from '../cognition/substrate/personas/SoulLoader.js';
 import { renderPersonalitySection } from '../cognition/substrate/personas/personalityPrompt.js';
 import type { LearningConfig, LoopManifest } from '../cognition/learning/types.js';
+import type { AgencyLaunchOptions } from './runtime/agencyLaunch/types.js';
 import { runCitationVerification } from './runtime/citationVerification.js';
 import type {
   AgentOSUsageAggregate,
@@ -335,6 +336,14 @@ export interface AgentOptions extends BaseAgentConfig {
    * bound to a learner. The legacy runtime ignores it.
    */
   learning?: boolean | LearningConfig;
+  /**
+   * Temporary teams this agent launches from a turn, with `runtime: 'gmi'`: `launch: true` registers the
+   * `launch_agency` tool, which runs an `agency()` team on one goal and returns its answer as the call's result, and
+   * the other fields bound every launch (depth, seats, launches in flight, budget share and pool, deadline, `members`
+   * a launch may seat by key, `hitl`). Every bound is checked at construction. Off unless `launch` is true; the legacy
+   * runtime throws when it is.
+   */
+  agencies?: AgencyLaunchOptions;
   /** Explicit runtime binding. No provider is discovered from the process environment for this path. */
   voice?: BaseAgentConfig['voice'] & { session?: { factory: VoiceSessionFactory; agent: VoiceAgent } };
 }
@@ -805,7 +814,8 @@ async function generateWithValidation(
  *   remain text calls. The full runtime does not apply the voice flag.
  * @returns An {@link Agent} instance with `generate`, `stream`, `session`, and `close` methods.
  * @throws {Error} With `runtime: 'gmi'`, at construction, naming an option the GMI path
- *   cannot honour (see {@link gmi}).
+ *   cannot honour (see {@link gmi}); without it, when `agencies.launch` is set, which only
+ *   the GMI path runs.
  *
  * @example
  * ```ts
@@ -824,6 +834,10 @@ export function agent(opts: AgentOptions): Agent {
   }
   // Before anything of the legacy path runs: its diagnostics and warnings describe that path.
   if (opts.runtime === 'gmi') return gmi(opts);
+  // A legacy agent has no tool loop of a GMI to run launch_agency in; taking the option would offer no tool.
+  if (opts.agencies?.launch === true) {
+    throw new Error("agent(): agencies.launch runs on the GMI path; set runtime: 'gmi' or use gmi().");
+  }
   const sessionBuffers = new Map<string, SessionHistoryBuffer | null>();
   // In-memory usage tally per session and per agent. Populated synchronously
   // after every generate/send/stream call so `agent.usage()` and
