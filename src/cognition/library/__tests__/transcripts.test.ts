@@ -14,7 +14,7 @@ import {
   type TranscriptFormat,
 } from '../browser.js';
 
-/** A vector's text, as written by hand under `vectors/`. */
+/** A vector's text, as it is under `vectors/`: written for these tests, or a real export (`vectors/SOURCES.md`). */
 function vector(name: string): string {
   return readFileSync(new URL(`./vectors/${name}`, import.meta.url), 'utf8');
 }
@@ -566,6 +566,70 @@ describe('readTranscript', () => {
       { seq: 1, startMs: 4_000, endMs: null, text: 'Hi.' },
     ]);
     expect(readTranscript('note: one\nnote: two\n', 'lines').labels).toEqual([]);
+  });
+
+  it('reads real Otter exports made with the names and the times, with the times alone and with the names alone', () => {
+    // Real exports, cut from transcripts published under open licences (vectors/SOURCES.md). Otter's export can leave
+    // out the speakers' names or the times, and each layout reads into the turns its headers give.
+    const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
+    for (const file of ['otter-names-times.txt', 'otter-times.txt', 'otter-names.txt']) {
+      const text = vector(file);
+      const read = readTranscript(text, 'otter');
+
+      expect(read, file).toEqual(expected(file));
+      // Whole, each closes with Otter's line and is named Otter's; saved on Windows, it reads the same.
+      expect(transcriptFormatOf(file, bytes(text)), file).toBe('otter');
+      expect(readTranscript(bytes(`﻿${text.replace(/\n/g, '\r\n')}`), 'otter'), `${file} with a byte order mark and CRLF`).toEqual(read);
+    }
+  });
+
+  it('reads an Otter export made without times by the two spaces after each name, and one made without names by its times', () => {
+    const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
+
+    // Older exports write no spaces after a header and may end with no line feed: a time alone still heads a turn.
+    const older = vector('otter-times.txt')
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .join('\n')
+      .trimEnd();
+    expect(readTranscript(older, 'otter')).toEqual(expected('otter-times.txt'));
+    expect(transcriptFormatOf('talk.txt', bytes(older))).toBe('otter');
+
+    // Without the closing line, times or names on lines of their own are not told from an agenda or a page of
+    // headings, so such a file is named plain lines; read with `otter`, it reads by its headers all the same.
+    const unbranded = vector('otter-names.txt').replace(/Transcribed by https:\/\/otter\.ai\n$/, '');
+    expect(transcriptFormatOf('call.txt', bytes(unbranded))).toBe('lines');
+    expect(readTranscript(unbranded, 'otter')).toEqual(expected('otter-names.txt'));
+    expect(transcriptFormatOf('agenda.md', bytes('9:00\nWelcome\n\n9:30\nBudget review\n'))).toBe('lines');
+    expect(transcriptFormatOf('notes.md', bytes('Budget  \nTravel is over plan.\n\nVenue  \nIt holds forty.\n'))).toBe('lines');
+
+    // A name with no spaces after it is a paragraph, as Otter writes a speaker's next paragraph with no header.
+    expect(readTranscript('Ana Silva  \nI agree.\n\nLeo and Ana?\n\nLeo Park  \nYes.\n', 'otter')).toEqual({
+      format: 'otter',
+      turns: [
+        { seq: 1, startMs: null, endMs: null, text: 'I agree. Leo and Ana?' },
+        { seq: 2, startMs: null, endMs: null, text: 'Yes.' },
+      ],
+      labels: [
+        { seq: 1, label: 'Ana Silva' },
+        { seq: 2, label: 'Leo Park' },
+      ],
+      durationMs: null,
+    });
+
+    // An export has one kind of header, the kind most of its lines have, so a paragraph that is a time alone is words.
+    const texts = (text: string): string[] => readTranscript(text, 'otter').turns.map((turn) => turn.text);
+    expect(texts('Ana Silva  \nWhen?\n\nLeo Park  \nAt\n\n10:30\n\nAna Silva  \nGood.\n')).toEqual(['When?', 'At 10:30', 'Good.']);
+    expect(texts('Ana Silva  0:01\nWhen?\n\nLeo Park  0:04\nAt\n\n10:30\n\nAna Silva  0:09\nGood.\n')).toEqual(['When?', 'At 10:30', 'Good.']);
+  });
+
+  it('reads a Word file laid out as an Otter export made without names by its times', async () => {
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    const paragraphs = vector('otter-times.txt')
+      .split('\n')
+      .filter((line) => line.trim().length > 0);
+
+    expect(await readWordTranscript(wordFileOf(paragraphs), { extractRawText })).toEqual({ ...expected('otter-times.txt'), format: 'docx' });
   });
 
   it('reads Fireflies\'s sentences from a list at the top, with times given as text, and a sentence with no speaker', () => {
