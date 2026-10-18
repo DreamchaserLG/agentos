@@ -172,6 +172,43 @@ The two classes behave alike, and [one suite](https://github.com/framerslab/agen
 
 `ConversationManager`'s persistence also makes a table named `conversations`, with other columns, so the two cannot share one database's tables: give `SqlStorageAdapter` a `segment`, or a database of its own.
 
+## ConversationManager persistence
+
+[`ConversationManager`](https://github.com/framerslab/agentos/blob/master/src/core/conversation/ConversationManager.ts) keeps the runtime's conversation contexts. `AgentOS.initialize()` hands it the host's storage adapter; without one, or with `conversationManagerConfig.persistenceEnabled: false`, conversations live in memory only.
+
+```ts
+import { resolveStorageAdapter } from '@framers/sql-storage-adapter';
+import { ConversationManager } from '@framers/agentos';
+
+const db = await resolveStorageAdapter({ filePath: './conversations.db' });
+
+// AgentOS.initialize() does this with the host's storageAdapter.
+const conversations = new ConversationManager();
+await conversations.initialize({ persistenceEnabled: true }, undefined, db);
+
+const context = await conversations.getOrCreateConversationContext('conv-1', 'user-1');
+// ... the runtime adds the turn's messages to the context ...
+await conversations.saveConversation(context);
+
+// A restarted process on the same database:
+const restarted = new ConversationManager();
+await restarted.initialize({ persistenceEnabled: true }, undefined, db);
+const again = await restarted.getConversation('conv-1');
+```
+
+- `initialize()` creates the `conversations` and `conversation_messages` tables and brings a database an earlier version made up to date: it adds the `content_type`, `name`, `thinking_blocks`, `summarized_count` and `seq` columns, and on PostgreSQL widens INTEGER timestamp columns to BIGINT. A millisecond time does not fit PostgreSQL's INTEGER, so such a table refused every save.
+- `saveConversation()` writes the conversation and its messages in one transaction. A conversation evicted from memory (`maxActiveConversationsInMemory`) and every conversation still in memory at `shutdown()` are saved first. `getOrCreateConversationContext()` and `getConversation()` load a conversation that is not in memory.
+- A message reads back with its role, content, time, tool calls, tool call id, name, thinking blocks, summarized count, metadata and the voice fields (`audioUrl`, `audioTranscript`, `voiceSettings`, `multimodalData`). Text reads back as text, so a tool result that holds JSON stays a string; null content and an array of content parts read back as they were. A row an earlier version wrote has no `content_type` and reads back as that version read it: text that starts and ends with braces or brackets is parsed when it parses.
+- Messages come back oldest first; messages that share a millisecond come back in the order the conversation had them.
+- Times read back as numbers on every backend; PostgreSQL's driver reads a BIGINT as a string.
+- A conversation with no user is stored with an empty `user_id` and reads back without one.
+- `appendOnlyPersistence: true` inserts each row once and never updates or deletes one: a message rewritten in memory keeps its first text on disk, `deleteConversation()` throws, and the last-active time is the newest message's. A host that runs a sealed provenance profile turns it on.
+- Without it, a save rewrites each message, and `deleteConversation()` deletes the conversation's messages with it, on SQLite connections that leave foreign keys off too.
+
+The table is the conversation's record: a message that leaves the history in memory, cut by `maxHistoryLengthMessages` or folded into a summary, keeps its row and comes back on load. `getHistory()` then returns the newest `maxHistoryLengthMessages` messages, and a summary sorts by its own time, which is later than the messages it was placed before.
+
+[One suite](https://github.com/framerslab/agentos/blob/master/src/core/conversation/__tests__/ConversationManager.persistence.test.ts) runs this on sql.js, better-sqlite3 and PostgreSQL.
+
 ## Troubleshooting
 
 **`better-sqlite3` does not load**: install the build tools (`xcode-select --install` on macOS, `build-essential` on Debian) and reinstall. With `type: 'sqlite'` there is no fallback; without `type`, Node falls back to sql.js.
