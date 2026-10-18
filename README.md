@@ -15,7 +15,7 @@
 [![tests](https://img.shields.io/endpoint?url=https://unpkg.com/@framers/agentos@latest/.github/badges/tests.json&style=flat-square&logo=vitest&logoColor=white)](https://github.com/framerslab/agentos/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/framerslab/agentos/graph/badge.svg)](https://codecov.io/gh/framerslab/agentos)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4+-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![License](https://img.shields.io/npm/l/@framers/agentos?style=flat-square&color=blue)](https://github.com/framerslab/agentos/blob/master/LICENSE)
+[![License](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fregistry.npmjs.org%2F%40framers%2Fagentos%2Flatest&query=%24.license&label=license&color=blue&style=flat-square)](https://github.com/framerslab/agentos/blob/master/LICENSE)
 [![NVIDIA Inception](https://img.shields.io/badge/NVIDIA_Inception-Member-76B900?style=flat-square&logo=nvidia&logoColor=white)](https://www.nvidia.com/en-us/startups/)
 [![LongMemEval-S](https://img.shields.io/badge/LongMemEval--S-85.6%25-2ea043?style=flat-square)](https://docs.agentos.sh/blog/2026/04/27/longmemeval-s-83-with-semantic-embedder)
 [![LongMemEval-M](https://img.shields.io/badge/LongMemEval--M-70.2%25-2ea043?style=flat-square)](https://docs.agentos.sh/blog/2026/04/29/longmemeval-m-70-with-topk5)

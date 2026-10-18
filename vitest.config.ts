@@ -89,9 +89,10 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       // text-summary prints the totals to the log; json-summary writes the totals and
-      // each file's figures to coverage/coverage-summary.json; lcov writes
-      // coverage/lcov.info, which CI uploads to Codecov, and the HTML report.
-      reporter: ['text-summary', 'json-summary', 'lcov'],
+      // each file's figures to coverage/coverage-summary.json; lcovonly writes
+      // coverage/lcov.info, which CI uploads to Codecov. For the HTML report, add
+      // `--coverage.reporter=html`.
+      reporter: ['text-summary', 'json-summary', 'lcovonly'],
       reportsDirectory: 'coverage',
       // Every source file is in the report, tested or not. Vitest leaves the test
       // files (test.include) out by itself; the helpers, fixtures and contract
