@@ -101,14 +101,14 @@ export default defineConfig({
       include: ['src/**/*.ts'],
       exclude: ['**/__tests__/**', '**/*.d.ts'],
       // Two points below the figures CI measured when these were last raised (run
-      // 39095848481: lines 79.38, statements 77.69, functions 80.16, branches
-      // 69.63 percent), so a change that takes more than that away fails the run.
+      // 39112738248: lines 80.65, statements 78.91, functions 81.72, branches
+      // 70.62 percent), so a change that takes more than that away fails the run.
       // Raise them as coverage grows; never lower them.
       thresholds: {
-        lines: 77.38,
-        statements: 75.69,
-        functions: 78.16,
-        branches: 67.63,
+        lines: 78.65,
+        statements: 76.91,
+        functions: 79.72,
+        branches: 68.62,
       },
     },
   },
