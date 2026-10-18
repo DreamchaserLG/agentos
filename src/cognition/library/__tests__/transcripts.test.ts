@@ -579,21 +579,21 @@ describe('readTranscript', () => {
       expect(read, file).toEqual(expected(file));
       // Whole, each closes with Otter's line and is named Otter's; saved on Windows, it reads the same.
       expect(transcriptFormatOf(file, bytes(text)), file).toBe('otter');
-      expect(readTranscript(bytes(`﻿${text.replace(/\n/g, '\r\n')}`), 'otter'), `${file} with a byte order mark and CRLF`).toEqual(read);
+      expect(readTranscript(bytes(`\ufeff${text.replace(/\n/g, '\r\n')}`), 'otter'), `${file} with a byte order mark and CRLF`).toEqual(read);
     }
   });
 
   it('reads an Otter export made without times by the two spaces after each name, and one made without names by its times', () => {
     const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 
-    // Older exports write no spaces after a header and may end with no line feed: a time alone still heads a turn.
-    const older = vector('otter-times.txt')
+    // With no spaces after each header and no line feed at the file's end, a time alone still heads a turn.
+    const bare = vector('otter-times.txt')
       .split('\n')
       .map((line) => line.trimEnd())
       .join('\n')
       .trimEnd();
-    expect(readTranscript(older, 'otter')).toEqual(expected('otter-times.txt'));
-    expect(transcriptFormatOf('talk.txt', bytes(older))).toBe('otter');
+    expect(readTranscript(bare, 'otter')).toEqual(expected('otter-times.txt'));
+    expect(transcriptFormatOf('talk.txt', bytes(bare))).toBe('otter');
 
     // Without the closing line, times or names on lines of their own are not told from an agenda or a page of
     // headings, so such a file is named plain lines; read with `otter`, it reads by its headers all the same.
@@ -621,6 +621,35 @@ describe('readTranscript', () => {
     const texts = (text: string): string[] => readTranscript(text, 'otter').turns.map((turn) => turn.text);
     expect(texts('Ana Silva  \nWhen?\n\nLeo Park  \nAt\n\n10:30\n\nAna Silva  \nGood.\n')).toEqual(['When?', 'At 10:30', 'Good.']);
     expect(texts('Ana Silva  0:01\nWhen?\n\nLeo Park  0:04\nAt\n\n10:30\n\nAna Silva  0:09\nGood.\n')).toEqual(['When?', 'At 10:30', 'Good.']);
+  });
+
+  it('reads an Otter export made with neither names nor times into its paragraphs, a time alone among them as words, without the closing line', () => {
+    // Such an export is its paragraphs and Otter's closing line. A paragraph that is a time alone further down does not
+    // make it an export of times: the paragraphs before it are turns, not lines before a first header.
+    const neither = 'Hello.\n\nWhat time?\n\n2:30\n\nGood.\n\nTranscribed by https://otter.ai\n';
+    expect(transcriptFormatOf('call.txt', new TextEncoder().encode(neither))).toBe('otter');
+    expect(readTranscript(neither, 'otter')).toEqual({
+      format: 'otter',
+      turns: [
+        { seq: 1, startMs: null, endMs: null, text: 'Hello.' },
+        { seq: 2, startMs: null, endMs: null, text: 'What time?' },
+        { seq: 3, startMs: null, endMs: null, text: '2:30' },
+        { seq: 4, startMs: null, endMs: null, text: 'Good.' },
+      ],
+      labels: [],
+      durationMs: null,
+    });
+  });
+
+  it('reads the line straight after an Otter header as that turn\'s words, a time alone too', () => {
+    // Otter writes each header's words on the line after it, so a paragraph that is a time alone, in an export made
+    // without names, is the words of the header above it and heads no turn.
+    const said = '0:04  \nWhat time?\n\n0:09  \n2:30\n\n0:12  \nGood.\n\nTranscribed by https://otter.ai\n';
+    expect(readTranscript(said, 'otter').turns).toEqual([
+      { seq: 1, startMs: 4_000, endMs: null, text: 'What time?' },
+      { seq: 2, startMs: 9_000, endMs: null, text: '2:30' },
+      { seq: 3, startMs: 12_000, endMs: null, text: 'Good.' },
+    ]);
   });
 
   it('reads a Word file laid out as an Otter export made without names by its times', async () => {
