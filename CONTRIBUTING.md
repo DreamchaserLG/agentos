@@ -21,7 +21,7 @@ pnpm run build
 pnpm run test
 ```
 
-CI runs on Node 22 with pnpm 10. Its "Test & Lint" job runs, in order: `pnpm install`, `pnpm run build`, `pnpm run verify:exports`, `pnpm run lint`, `pnpm run typecheck` and `pnpm run test -- --coverage`. Tests that need Postgres run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI starts a Postgres service for them. A second job, "Batch-1 gated tests", runs a fixed set of test files. Maintainers merge a pull request only when both jobs are green.
+CI runs on Node 22 with pnpm 10. Its "Test & Lint" job runs, in order: `pnpm install`, `pnpm run build`, `pnpm run verify:exports`, `pnpm run lint`, `pnpm run typecheck` and `pnpm run test:coverage`. Tests that need Postgres run only when `AGENTOS_TEST_POSTGRES_URL` is set; CI starts a Postgres service for them. `pnpm run test:coverage` is the whole suite with coverage on, and it fails when coverage falls below the thresholds in [`vitest.config.ts`](https://github.com/framerslab/agentos/blob/master/vitest.config.ts); each is two points below the figure measured when it was last raised, and raising them as coverage grows keeps that floor rising. CI sends the figures to [Codecov](https://codecov.io/gh/framerslab/agentos) on a push to `master` and on a pull request from a branch of this repository, and keeps `coverage/coverage-summary.json` and `coverage/lcov.info` from every run as the job's `coverage` artifact. A second job, "Batch-1 gated tests", runs a fixed set of test files. Maintainers merge a pull request only when both jobs are green.
 
 To run one test file: `pnpm vitest run <path>`.
 
