@@ -1,6 +1,6 @@
 ---
 title: Storage & Scaling
-description: The @framers/sql-storage-adapter quickstart (better-sqlite3, sql.js, IndexedDB, Capacitor, Postgres, Supabase, Electron), cloud backups and data migration, and the path for a memory brain from a SQLite file to Postgres or Qdrant with MigrationEngine.
+description: The @framers/sql-storage-adapter quickstart (better-sqlite3, sql.js, IndexedDB, Capacitor, Postgres, Supabase, Electron), cloud backups and data migration, AgentOS's conversation storage adapters, and the path for a memory brain from a SQLite file to Postgres or Qdrant with MigrationEngine.
 keywords:
   - agentos sql storage
   - sql-storage-adapter
@@ -129,6 +129,48 @@ const memory = await Memory.createWithAdapter(storage, { brainId: 'support-agent
 ```
 
 [`SqlStorageMemoryArchive`](https://github.com/framerslab/agentos/blob/master/src/cognition/memory/archive/SqlStorageMemoryArchive.ts) takes an adapter, its storage features and a brain id. `CognitiveMemoryManager` does not take an adapter: its `initialize()` takes a vector store, a knowledge graph, an embedding manager and a working memory. [`AgencyMemoryManager`](https://github.com/framerslab/agentos/blob/master/src/agents/agency/AgencyMemoryManager.ts) takes a vector store manager.
+
+## Conversation storage
+
+[`IStorageAdapter`](https://github.com/framerslab/agentos/blob/master/src/core/storage/IStorageAdapter.ts) keeps conversations and their messages. AgentOS has two implementations, both exported from `@framers/agentos`:
+
+| Class | Keeps its data in | For |
+|---|---|---|
+| [`InMemoryStorageAdapter`](https://github.com/framerslab/agentos/blob/master/src/core/storage/InMemoryStorageAdapter.ts) | the process's memory, emptied by `close()` | tests, and sessions that keep nothing |
+| [`SqlStorageAdapter`](https://github.com/framerslab/agentos/blob/master/src/core/storage/SqlStorageAdapter.ts) | a `conversations` and a `messages` table, on any backend the resolver opens: better-sqlite3, sql.js, IndexedDB, Capacitor SQLite or PostgreSQL | everything else |
+
+```ts
+import { SqlStorageAdapter } from '@framers/agentos';
+
+const storage = new SqlStorageAdapter({
+  priority: ['postgres'],
+  postgres: { connectionString: process.env.DATABASE_URL },
+  segment: 'agentos',       // the tables in a schema of their own
+  messageRetentionDays: 90, // 0, the default, keeps every message
+});
+await storage.initialize();
+
+const now = Date.now();
+await storage.createConversation({ id: 'c1', userId: 'u1', createdAt: now, lastActivity: now });
+await storage.storeMessage({ id: 'm1', conversationId: 'c1', role: 'user', content: 'hello', timestamp: now });
+const newestTwenty = await storage.getMessages('c1', { order: 'desc', limit: 20 });
+```
+
+`SqlStorageAdapter` takes the resolver's options (`filePath`, `priority`, `postgres`, `segment`, `strict`, `quiet`) and two of its own:
+
+- `enableAutoMigration`, `true` by default: `initialize()` creates the tables and their indexes, adds the columns added since a database was made, and on PostgreSQL widens INTEGER timestamp columns to BIGINT. With `false` it creates nothing, and the host provides the tables.
+- `messageRetentionDays`, `0` by default: above 0, `initialize()` and every `storeMessage()` delete the messages older than that many days. Conversations stay. With `enableAutoMigration: false`, the `messages` table has to exist before `initialize()`.
+
+The two classes behave alike, and [one suite](https://github.com/framerslab/agentos/blob/master/src/core/storage/__tests__/storageAdapter.contract.ts) runs against the in-memory adapter and against `SqlStorageAdapter` on sql.js, better-sqlite3 and PostgreSQL:
+
+- Timestamps are milliseconds. The SQL tables hold them in BIGINT columns: PostgreSQL's INTEGER stops at 2147483647 ([numeric types](https://www.postgresql.org/docs/current/datatype-numeric.html)).
+- `listConversations()` puts the most recent activity first, and `getMessages()` the oldest message first unless `order: 'desc'`. Both take `limit`, `offset` or both.
+- `storeMessage()` refuses a message whose conversation does not exist or whose id is taken, and sets the conversation's `lastActivity` to the message's `timestamp`.
+- `deleteConversation()` deletes the conversation's messages with it. `SqlStorageAdapter` deletes both in one transaction and does not lean on the table's foreign key: SQLite enforces one only on a connection that turns foreign keys on, which better-sqlite3 does and sql.js, IndexedDB and Capacitor do not.
+- A usage of zero tokens reads back as zero. `getConversationTokenUsage()` sums the counts, and reports cache tokens only when a message reported them.
+- What the in-memory adapter holds is its own copy: changing an object passed in or handed back changes nothing stored. Metadata and tool calls go through JSON in both classes, so a `Date` comes back as a string.
+
+`ConversationManager`'s persistence also makes a table named `conversations`, with other columns, so the two cannot share one database's tables: give `SqlStorageAdapter` a `segment`, or a database of its own.
 
 ## Troubleshooting
 
