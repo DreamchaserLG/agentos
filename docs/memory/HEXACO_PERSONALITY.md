@@ -92,6 +92,8 @@ The propagation diagram at the top of this page shows the five surfaces. Each is
 | **Conscientiousness:** "Be thorough and systematic. Structure responses clearly. Follow through on details. Prefer precision over speed." | **Conscientiousness:** "Be flexible and adaptive. Prioritize the big picture over details. Respond quickly. Tolerate ambiguity and improvise." |
 | **Openness:** "Explore creative angles and unconventional ideas. Draw unexpected connections. Question established approaches." | **Openness:** "Stick to proven approaches and established knowledge. Be practical and concrete. Favor reliability over novelty." |
 
+The table is the default `conversation` register; a host may pass `register: 'writing'` to `renderPersonalitySection` for grounded writing, as [Notetaker traits and writing](../PERSONAS.md#notetaker-traits-and-writing) describes.
+
 Source: [`src/cognition/substrate/personas/personalityPrompt.ts`](https://github.com/framerslab/agentos/blob/master/src/cognition/substrate/personas/personalityPrompt.ts).
 
 ### 2. Memory encoding strength
