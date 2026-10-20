@@ -1,0 +1,95 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { GROUNDING_FIXTURES } from './grounding-fixtures.ts';
+import {
+  profiles,
+  runSemanticAcceptance,
+  type SemanticRecord,
+} from './semantic.ts';
+
+const grounded = {
+  grounded: true, complete: true, unsupported: [], missing: [],
+  rationale: 'All fixture requirements are preserved.',
+};
+const ungrounded = {
+  grounded: false, complete: true,
+  unsupported: ['The answer adds a suggestion or changes an obligation.'],
+  missing: [], rationale: 'The source does not support the added meaning.',
+};
+
+/** This judge is only a runner test. The keyed workflow never imports it. */
+const fakeJudge = async (input: { source: string; answer: string }) => {
+  const fixture = GROUNDING_FIXTURES.find((entry) => entry.source === input.source);
+  assert.ok(fixture);
+  return fixture.rejected.includes(input.answer) ? ungrounded : grounded;
+};
+
+test('covers every trait in every band and the preset and two combined corners', () => {
+  const entries = profiles();
+  assert.equal(entries.length, 21);
+  for (const trait of ['honesty', 'emotionality', 'extraversion', 'agreeableness', 'conscientiousness', 'openness']) {
+    for (const band of ['low', 'moderate', 'high']) {
+      assert.ok(entries.some((entry) => entry.id === `${trait}:${band}`));
+    }
+  }
+  for (const entry of entries) {
+    assert.ok(entry.section.startsWith('## Personality & Communication Style\n\nChange only how grounded material is presented:'));
+  }
+});
+
+test('visits every calibration and generation for every profile without skipping', async () => {
+  const records: SemanticRecord[] = [];
+  let writes = 0;
+  let judgments = 0;
+  const result = await runSemanticAcceptance({
+    write: async ({ source, section }) => {
+      writes += 1;
+      assert.ok(section.includes('never change its meaning'));
+      return GROUNDING_FIXTURES.find((entry) => entry.source === source)!.accepted[0]!;
+    },
+    judge: async (input) => { judgments += 1; return fakeJudge(input); },
+    record: async (record) => { records.push(record); },
+  });
+  assert.deepEqual(result, { profiles: 21, fixtures: 2, generated: 42, judgments: 210 });
+  assert.equal(writes, 42);
+  assert.equal(judgments, 210);
+  assert.equal(records.length, 210);
+  assert.ok(records.every((record) => record.passed));
+});
+
+test('fails when a planted suggestion is accepted', async () => {
+  await assert.rejects(runSemanticAcceptance({
+    write: async () => 'Unused', judge: async () => grounded, record: async () => {},
+  }), /semantic acceptance failed/);
+});
+
+test('fails when a grounded paraphrase is refused', async () => {
+  await assert.rejects(runSemanticAcceptance({
+    write: async () => 'Unused', judge: async () => ungrounded, record: async () => {},
+  }), /semantic acceptance failed/);
+});
+
+test('fails on an invented generated answer after successful calibration', async () => {
+  await assert.rejects(runSemanticAcceptance({
+    write: async ({ source }) => GROUNDING_FIXTURES.find((entry) => entry.source === source)!.rejected[0]!,
+    judge: fakeJudge, record: async () => {},
+  }), /semantic acceptance failed: .*:generated/);
+});
+
+test('does not interpret a malformed judgment as a rejection that passes calibration', async () => {
+  for (const reply of [null, {}, { ...ungrounded, rationale: '' }, { ...ungrounded, grounded: 'false' }]) {
+    await assert.rejects(runSemanticAcceptance({
+      write: async () => 'Unused', judge: async () => reply, record: async () => {},
+    }));
+  }
+});
+
+test('propagates provider failure and never retries it as a passing result', async () => {
+  let calls = 0;
+  await assert.rejects(runSemanticAcceptance({
+    write: async () => 'Unused',
+    judge: async () => { calls += 1; throw new Error('fixture provider unavailable'); },
+    record: async () => {},
+  }), /fixture provider unavailable/);
+  assert.equal(calls, 1);
+});

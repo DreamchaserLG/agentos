@@ -36,9 +36,12 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build the package
         run: pnpm run build
-      - name: Check the public entry declarations
+      - name: Check the public entry and semantic runner declarations
         run: >-
-          pnpm exec tsc --noEmit --module NodeNext --moduleResolution NodeNext
-          --target ES2022 --skipLibCheck scripts/personas-public-entry.acceptance.ts
+          pnpm exec tsc --noEmit --allowImportingTsExtensions
+          --module NodeNext --moduleResolution NodeNext --target ES2022 --skipLibCheck
+          scripts/personas-public-entry.acceptance.ts scripts/personas/semantic.acceptance.ts
       - name: Import the built entry without a source alias
         run: node --experimental-strip-types --test scripts/personas-public-entry.acceptance.ts
+      - name: Exercise semantic runner failures without credentials
+        run: node --experimental-strip-types --test scripts/personas/semantic.acceptance.ts
