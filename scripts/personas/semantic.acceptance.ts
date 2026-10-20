@@ -37,7 +37,7 @@ test('covers every trait in every band and the preset and two combined corners',
   }
 });
 
-test('visits every calibration and generation for every profile without skipping', async () => {
+test('calibrates each fixture once under the preset and generates for every profile without skipping', async () => {
   const records: SemanticRecord[] = [];
   let writes = 0;
   let judgments = 0;
@@ -50,11 +50,19 @@ test('visits every calibration and generation for every profile without skipping
     judge: async (input) => { judgments += 1; return fakeJudge(input); },
     record: async (record) => { records.push(record); },
   });
-  assert.deepEqual(result, { profiles: 21, fixtures: 2, generated: 42, judgments: 210 });
+  assert.deepEqual(result, { profiles: 21, fixtures: 2, generated: 42, judgments: 50 });
   assert.equal(writes, 42);
-  assert.equal(judgments, 210);
-  assert.equal(records.length, 210);
+  assert.equal(judgments, 50);
+  assert.equal(records.length, 50);
   assert.ok(records.every((record) => record.passed));
+  // The eight calibration judgments come first, all under the preset's section; then one generated answer a profile and fixture.
+  const calibration = records.slice(0, 8);
+  assert.ok(calibration.every((record) => record.case !== 'generated' && record.profile === 'preset'));
+  assert.deepEqual(calibration.map((record) => record.case), [
+    'grounded-1', 'grounded-2', 'planted-1', 'planted-2', 'grounded-1', 'grounded-2', 'planted-1', 'planted-2',
+  ]);
+  assert.ok(records.slice(8).every((record) => record.case === 'generated'));
+  assert.equal(new Set(records.slice(8).map((record) => record.profile)).size, 21);
 });
 
 test('fails when a planted suggestion is accepted', async () => {

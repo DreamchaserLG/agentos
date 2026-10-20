@@ -5,7 +5,7 @@ import {
   type TraitBand,
 } from '@framers/agentos/cognition/substrate';
 import { z } from 'zod';
-import { GROUNDING_FIXTURES } from './grounding-fixtures.ts';
+import { GROUNDING_FIXTURES, type GroundingFixture } from './grounding-fixtures.ts';
 
 type Trait = (typeof HEXACO_TRAIT_KEYS)[number];
 /** One writing section rendered for a named trait profile. */
@@ -60,42 +60,53 @@ export function profiles(): WritingProfile[] {
   });
 }
 
-/** Judges the controls and one generated answer for every profile and fixture, stopping at the first failure. */
+/**
+ * Calibrates the judge on each fixture's controls once, under the preset's section, then judges one generated answer
+ * for every profile and fixture, stopping at the first failure. A control judged under every profile multiplied the
+ * judge's variance without testing the writer: 168 of 210 judgments in the first keyed runs, and the run stopped on
+ * a control it had passed before.
+ */
 export async function runSemanticAcceptance(deps: {
   write: (input: { source: string; section: string }) => Promise<string>;
   judge: (input: JudgeInput) => Promise<unknown>;
   record: (record: SemanticRecord) => Promise<void>;
 }): Promise<{ profiles: number; fixtures: number; generated: number; judgments: number }> {
   const entries = profiles();
+  const preset = entries.find((entry) => entry.id === 'preset');
+  if (!preset) throw new Error('missing preset profile');
   let generated = 0;
   let judgments = 0;
+  const judge = async (
+    profile: WritingProfile, fixture: GroundingFixture, answer: string, expected: boolean, label: string,
+  ): Promise<void> => {
+    if (answer.trim() === '') throw new Error('empty writing answer');
+    const verdict = GroundingVerdict.parse(await deps.judge({
+      source: fixture.source, required: fixture.required, section: profile.section, answer,
+    }));
+    const accepted = verdict.grounded && verdict.complete && verdict.unsupported.length === 0 && verdict.missing.length === 0;
+    // A negative control must be rejected for unsupported meaning, not a parse error or an unrelated omission.
+    const rejected = !verdict.grounded && verdict.unsupported.length > 0;
+    const passed = expected ? accepted : rejected;
+    judgments += 1;
+    await deps.record({
+      profile: profile.id, fixture: fixture.id, case: label,
+      section: profile.section, answer, expected, verdict, passed,
+    });
+    if (!passed) throw new Error(`semantic acceptance failed: ${profile.id}:${fixture.id}:${label}`);
+  };
+  for (const fixture of GROUNDING_FIXTURES) {
+    for (const [index, answer] of fixture.accepted.entries()) {
+      await judge(preset, fixture, answer, true, `grounded-${index + 1}`);
+    }
+    for (const [index, answer] of fixture.rejected.entries()) {
+      await judge(preset, fixture, answer, false, `planted-${index + 1}`);
+    }
+  }
   for (const profile of entries) {
     for (const fixture of GROUNDING_FIXTURES) {
-      const judge = async (answer: string, expected: boolean, label: string): Promise<void> => {
-        if (answer.trim() === '') throw new Error('empty writing answer');
-        const verdict = GroundingVerdict.parse(await deps.judge({
-          source: fixture.source, required: fixture.required, section: profile.section, answer,
-        }));
-        const accepted = verdict.grounded && verdict.complete && verdict.unsupported.length === 0 && verdict.missing.length === 0;
-        // A negative control must be rejected for unsupported meaning, not a parse error or an unrelated omission.
-        const rejected = !verdict.grounded && verdict.unsupported.length > 0;
-        const passed = expected ? accepted : rejected;
-        judgments += 1;
-        await deps.record({
-          profile: profile.id, fixture: fixture.id, case: label,
-          section: profile.section, answer, expected, verdict, passed,
-        });
-        if (!passed) throw new Error(`semantic acceptance failed: ${profile.id}:${fixture.id}:${label}`);
-      };
-      for (const [index, answer] of fixture.accepted.entries()) {
-        await judge(answer, true, `grounded-${index + 1}`);
-      }
-      for (const [index, answer] of fixture.rejected.entries()) {
-        await judge(answer, false, `planted-${index + 1}`);
-      }
       const answer = await deps.write({ source: fixture.source, section: profile.section });
       generated += 1;
-      await judge(answer, true, 'generated');
+      await judge(profile, fixture, answer, true, 'generated');
     }
   }
   return { profiles: entries.length, fixtures: GROUNDING_FIXTURES.length, generated, judgments };
