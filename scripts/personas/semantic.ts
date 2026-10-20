@@ -61,10 +61,11 @@ export function profiles(): WritingProfile[] {
 }
 
 /**
- * Calibrates the judge on each fixture's controls once, under the preset's section, then judges one generated answer
- * for every profile and fixture, stopping at the first failure. A control judged under every profile multiplied the
- * judge's variance without testing the writer: 168 of 210 judgments in the first keyed runs, and the run stopped on
- * a control it had passed before.
+ * Calibrates the judge on each fixture's grounded controls once, under the preset's section, then, for every profile
+ * and fixture, judges both planted controls under that profile's section and one generated answer, stopping at the
+ * first failure. A grounded control judged under every profile multiplied the judge's variance without testing the
+ * writer (the first keyed runs stopped on grounded controls the judge had passed before); a planted suggestion is
+ * still refused under every band, so no band's style text gets an unsupported meaning past the judge.
  */
 export async function runSemanticAcceptance(deps: {
   write: (input: { source: string; section: string }) => Promise<string>;
@@ -98,12 +99,12 @@ export async function runSemanticAcceptance(deps: {
     for (const [index, answer] of fixture.accepted.entries()) {
       await judge(preset, fixture, answer, true, `grounded-${index + 1}`);
     }
-    for (const [index, answer] of fixture.rejected.entries()) {
-      await judge(preset, fixture, answer, false, `planted-${index + 1}`);
-    }
   }
   for (const profile of entries) {
     for (const fixture of GROUNDING_FIXTURES) {
+      for (const [index, answer] of fixture.rejected.entries()) {
+        await judge(profile, fixture, answer, false, `planted-${index + 1}`);
+      }
       const answer = await deps.write({ source: fixture.source, section: profile.section });
       generated += 1;
       await judge(profile, fixture, answer, true, 'generated');
