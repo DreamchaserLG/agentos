@@ -26,7 +26,7 @@ import { classifyKeyFailure, retryAfterMs, statusOfKinds, type KeyFailureKind } 
 import { createGMIErrorFromError, GMIErrorCode } from '../../../utils/errors.js'; // Corrected import path
 import { clampMaxOutputTokens } from '../model-output-limits.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
-import { cheapestPricedChatModel } from './billing-probe-model.js';
+import { billingProbeModel } from './billing-probe-model.js';
 import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream } from '../stream-error-body.js';
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 
@@ -868,10 +868,10 @@ export class RequestyProvider implements IProvider {
    * Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. An auth failure is probed
    * with the models list, which rejects a revoked key with 403 "Invalid authorization token". A billing failure is
    * probed with the smallest billable completion, since a list need not refuse a key whose balance is spent: on the
-   * default model, else on the cheapest chat model the catalog lists with a price, never a free one. A provider that
-   * started without its catalog (every key was out) lists it with the probing key first and keeps it; with no priced
-   * model to send, the probe has no verdict and the key stays out. Every answer goes through the same classifier as
-   * a request's.
+   * default model when the catalog lists it with a price, else on the cheapest chat model the catalog lists with a
+   * price, never a free one, which need not refuse a spent balance either. A provider that started without its
+   * catalog (every key was out) lists it with the probing key first and keeps it; with no priced model to send, the
+   * probe has no verdict and the key stays out. Every answer goes through the same classifier as a request's.
    */
   private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
     const controller = new AbortController();
@@ -885,8 +885,8 @@ export class RequestyProvider implements IProvider {
     try {
       const listModels = () => fetch(`${this.config.baseURL}/models`, { method: 'GET', headers, signal: controller.signal });
       if (kind !== 'billing') return await verdict(await listModels());
-      let model = this.defaultModelId || cheapestPricedChatModel(this.availableModelsCache.values());
-      if (!model && this.availableModelsCache.size === 0) {
+      // The catalog prices the default, so a provider that started without one lists it first.
+      if (this.availableModelsCache.size === 0) {
         const listed = await listModels();
         if (!listed.ok) return await verdict(listed);
         const body = (await listed.json().catch(() => ({}))) as Partial<RequestyListModelsAPIResponse>;
@@ -896,8 +896,8 @@ export class RequestyProvider implements IProvider {
             this.availableModelsCache.set(modelInfo.modelId, modelInfo);
           }
         }
-        model = cheapestPricedChatModel(this.availableModelsCache.values());
       }
+      const model = billingProbeModel(this.defaultModelId, this.availableModelsCache);
       if (!model) return 'unknown';
       return await verdict(
         await fetch(`${this.config.baseURL}/chat/completions`, {

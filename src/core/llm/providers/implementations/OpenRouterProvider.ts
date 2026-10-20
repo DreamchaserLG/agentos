@@ -30,7 +30,7 @@ import { stripGeminiOnlyParams } from '../openrouter-only-params';
 import { baseUrlCredentials, redactUrlSecrets } from '../url-secrets.js';
 import { buildSchemaInstructionText, SCHEMA_INSTRUCTION_LEAD } from '../../../../api/runtime/structuredReply.js';
 import { contentSafeConsole as console } from '../../../logging/contentSafeConsole.js';
-import { cheapestPricedChatModel } from './billing-probe-model.js';
+import { billingProbeModel } from './billing-probe-model.js';
 import { isReadableStream, maskCutSecretTail, parseErrorBody, readErrorStream, STREAM_ERROR_BODY_TIMEOUT_MS } from '../stream-error-body.js';
 
 /**
@@ -1664,12 +1664,12 @@ export class OpenRouterProvider implements IProvider {
    * Probes a key the pool took out of rotation, off the request path; a 200 re-admits it. An auth failure is probed
    * with `GET /key`, the documented read of the calling key (https://openrouter.ai/docs/api-reference/limits). A
    * billing failure is probed with the smallest billable completion, since that read reports the credit left rather
-   * than refusing for its lack: on the default model, else on the cheapest chat model the catalog lists with a
-   * price, never a free one, which need not refuse an account without credit (the same page names a negative
-   * balance, not an empty one, as what refuses free models). A
-   * provider that started without its catalog (every key was out) lists it with the probing key first and keeps it;
-   * with no priced model to send, the probe has no verdict and the key stays out. Every answer goes through the same
-   * classifier as a request's.
+   * than refusing for its lack: on the default model when the catalog lists it with a price, else on the cheapest
+   * chat model the catalog lists with a price, never a free one, which need not refuse an account without credit
+   * (the same page names a negative balance, not an empty one, as what refuses free models), so a free default
+   * cannot re-admit a key that its next request would take out again. A provider that started without its catalog
+   * (every key was out) lists it with the probing key first and keeps it; with no priced model to send, the probe
+   * has no verdict and the key stays out. Every answer goes through the same classifier as a request's.
    */
   private async probeKey(apiKey: string, kind: KeyFailureKind | undefined): Promise<ProbeResult> {
     const controller = new AbortController();
@@ -1684,8 +1684,8 @@ export class OpenRouterProvider implements IProvider {
       if (kind !== 'billing') {
         return await verdict(await fetch(`${this.config.baseURL}/key`, { method: 'GET', headers, signal: controller.signal }));
       }
-      let model = this.defaultModelId || cheapestPricedChatModel(this.availableModelsCache.values());
-      if (!model && this.availableModelsCache.size === 0) {
+      // The catalog prices the default, so a provider that started without one lists it first.
+      if (this.availableModelsCache.size === 0) {
         const listed = await fetch(`${this.config.baseURL}/models`, { method: 'GET', headers, signal: controller.signal });
         if (!listed.ok) return await verdict(listed);
         const body = (await listed.json().catch(() => ({}))) as Partial<OpenRouterListModelsAPIResponse>;
@@ -1695,8 +1695,8 @@ export class OpenRouterProvider implements IProvider {
             this.availableModelsCache.set(modelInfo.modelId, modelInfo);
           }
         }
-        model = cheapestPricedChatModel(this.availableModelsCache.values());
       }
+      const model = billingProbeModel(this.defaultModelId, this.availableModelsCache);
       if (!model) return 'unknown';
       return await verdict(
         await fetch(`${this.config.baseURL}/chat/completions`, {

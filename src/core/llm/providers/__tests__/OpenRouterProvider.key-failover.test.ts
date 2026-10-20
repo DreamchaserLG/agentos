@@ -250,20 +250,31 @@ describe('OpenRouterProvider key failover', () => {
     }
   });
 
-  it("probes a billing failure on the default model when one is set, and has no verdict when there is no model to send", async () => {
+  it('probes a billing failure on the default model when the catalog lists it with a price, else on the cheapest priced model, and has no verdict when there is no model to send', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     try {
-      const withDefault = await mountProvider('key_alpha_0001,key_beta_0002', catalog, { defaultModelId: 'anthropic/claude-haiku-4.5' });
-      withDefault.client.request.mockRejectedValueOnce(axiosError(402, noCredits)).mockResolvedValueOnce({ data: okResponse() });
-      await withDefault.provider.generateCompletion(MODEL, messages, {});
-      fetchMock.mockResolvedValueOnce(fetchAnswer(402, noCredits));
-      vi.advanceTimersByTime(1001);
-      await withDefault.keyPool.recheck();
-      expect(JSON.parse(String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body))).toMatchObject({ model: 'anthropic/claude-haiku-4.5' });
-      await withDefault.provider.shutdown();
+      const haiku = { id: 'anthropic/claude-haiku-4.5', name: 'Haiku', context_length: 200000, pricing: { prompt: '0.000001', completion: '0.000005' } };
+      /** The model the billing probe of the first key sends, for a provider with this catalog and default. */
+      const probedModel = async (models: unknown[], defaultModelId: string): Promise<unknown> => {
+        fetchMock.mockClear();
+        const mounted = await mountProvider('key_alpha_0001,key_beta_0002', models, { defaultModelId });
+        mounted.client.request.mockRejectedValueOnce(axiosError(402, noCredits)).mockResolvedValueOnce({ data: okResponse() });
+        await mounted.provider.generateCompletion(MODEL, messages, {});
+        fetchMock.mockResolvedValueOnce(fetchAnswer(402, noCredits));
+        vi.advanceTimersByTime(1001);
+        await mounted.keyPool.recheck();
+        await mounted.provider.shutdown();
+        return JSON.parse(String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body)).model;
+      };
+      // A default the catalog lists with a price is the probe's model.
+      expect(await probedModel([...catalog, haiku], 'anthropic/claude-haiku-4.5')).toBe('anthropic/claude-haiku-4.5');
+      // A free default can answer 200 for an account with no credit, so the key would come back only to fail again;
+      // a default the catalog does not list has no known price. Both probe on the cheapest priced model instead.
+      expect(await probedModel(catalog, 'meta-llama/llama-3.3-8b-instruct:free')).toBe('openai/gpt-4o-mini');
+      expect(await probedModel(catalog, 'anthropic/claude-haiku-4.5')).toBe('openai/gpt-4o-mini');
 
       // Only free and unpriced models listed, no default: nothing is sent and the key stays out a longer while.
       fetchMock.mockClear();
@@ -281,7 +292,7 @@ describe('OpenRouterProvider key failover', () => {
     }
   });
 
-  it('lists the catalog with the probing key when the provider started with every key out, then probes on the cheapest priced model', async () => {
+  it('lists the catalog with the probing key when the provider started with every key out, then probes on the cheapest priced model, past a free default', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
     const fetchMock = vi.fn();
@@ -306,7 +317,12 @@ describe('OpenRouterProvider key failover', () => {
       const axios = (await import('axios')).default;
       vi.spyOn(axios, 'create').mockReturnValue(client as never);
       const provider = new OpenRouterProvider();
-      await provider.initialize({ apiKey: 'key_alpha_0001,key_beta_0002', keyPool: { strategy: 'ordered', recheckMs: 1000, id: 'openrouter:all-out', store } });
+      // The default is a free model, which the probe may send only once the catalog it has not listed yet prices it.
+      await provider.initialize({
+        apiKey: 'key_alpha_0001,key_beta_0002',
+        defaultModelId: 'meta-llama/llama-3.3-8b-instruct:free',
+        keyPool: { strategy: 'ordered', recheckMs: 1000, id: 'openrouter:all-out', store },
+      });
       expect(provider.isInitialized).toBe(true);
       expect(client.request).not.toHaveBeenCalled();
 

@@ -277,20 +277,31 @@ describe('RequestyProvider key failover', () => {
     }
   });
 
-  it('probes a billing failure on the default model when one is set, and has no verdict when only free models are listed', async () => {
+  it('probes a billing failure on the default model when the catalog lists it with a price, else on the cheapest priced model, and has no verdict when only free models are listed', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     try {
-      const withDefault = await mountProvider('key_alpha_0001,key_beta_0002', { keyPool: { recheckMs: 1000 }, defaultModelId: 'anthropic/claude-haiku-4.5' });
-      withDefault.client.request.mockRejectedValueOnce(axiosError(402, balanceExhausted)).mockResolvedValueOnce({ data: okResponse });
-      await ask(withDefault.provider);
-      fetchMock.mockResolvedValueOnce(fetchAnswer(402, balanceExhausted));
-      vi.advanceTimersByTime(1001);
-      await (withDefault.provider as unknown as { keyPool: PoolView }).keyPool.recheck();
-      expect(JSON.parse(String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body))).toMatchObject({ model: 'anthropic/claude-haiku-4.5' });
-      await withDefault.provider.shutdown();
+      const HAIKU = { id: 'anthropic/claude-haiku-4.5', context_window: 200000, input_price: 1e-6, output_price: 5e-6 };
+      /** The model the billing probe of the first key sends, for a provider with this catalog and default. */
+      const probedModel = async (models: unknown[], defaultModelId: string): Promise<unknown> => {
+        fetchMock.mockClear();
+        const mounted = await mountProvider('key_alpha_0001,key_beta_0002', { models, keyPool: { recheckMs: 1000 }, defaultModelId });
+        mounted.client.request.mockRejectedValueOnce(axiosError(402, balanceExhausted)).mockResolvedValueOnce({ data: okResponse });
+        await ask(mounted.provider);
+        fetchMock.mockResolvedValueOnce(fetchAnswer(402, balanceExhausted));
+        vi.advanceTimersByTime(1001);
+        await (mounted.provider as unknown as { keyPool: PoolView }).keyPool.recheck();
+        await mounted.provider.shutdown();
+        return JSON.parse(String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body)).model;
+      };
+      // A default the catalog lists with a price is the probe's model.
+      expect(await probedModel([CHAT_MODEL, HAIKU], HAIKU.id)).toBe(HAIKU.id);
+      // A free default can answer 200 for a spent balance, so the key would come back only to fail again; a default
+      // the catalog does not list has no known price. Both probe on the cheapest priced model instead.
+      expect(await probedModel([CHAT_MODEL, FREE_MODEL], FREE_MODEL.id)).toBe(CHAT_MODEL.id);
+      expect(await probedModel([CHAT_MODEL], HAIKU.id)).toBe(CHAT_MODEL.id);
       vi.restoreAllMocks();
 
       // Only a free model listed and no default: nothing is sent and the key stays out a longer while.
@@ -310,7 +321,7 @@ describe('RequestyProvider key failover', () => {
     }
   });
 
-  it('lists the catalog with the probing key when the provider started with every key out, then probes on the cheapest priced model', async () => {
+  it('lists the catalog with the probing key when the provider started with every key out, then probes on the cheapest priced model, past a free default', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
     const fetchMock = vi.fn();
@@ -336,7 +347,12 @@ describe('RequestyProvider key failover', () => {
         });
       }
       const provider = new RequestyProvider();
-      await provider.initialize({ apiKey: 'key_alpha_0001,key_beta_0002', keyPool: { strategy: 'ordered', recheckMs: 1000, id: 'requesty:billing-out', store } });
+      // The default is a free model, which the probe may send only once the catalog it has not listed yet prices it.
+      await provider.initialize({
+        apiKey: 'key_alpha_0001,key_beta_0002',
+        defaultModelId: FREE_MODEL.id,
+        keyPool: { strategy: 'ordered', recheckMs: 1000, id: 'requesty:billing-out', store },
+      });
       expect(provider.isInitialized).toBe(true);
       expect(client.request).not.toHaveBeenCalled();
 
