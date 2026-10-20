@@ -8,12 +8,8 @@ on:
 permissions:
   contents: read
 
-# Opening, reopening or pushing to a labelled pull request, or adding the
-# personas-semantic label, requests the keyed run, and a newer request cancels the
-# older one. Adding any other label keys a group of its own, its run id, so it
-# never cancels a keyed run, and its job is skipped, so it spends nothing.
 concurrency:
-  group: personas-semantic-${{ github.event.pull_request.number }}-${{ github.event.action == 'labeled' && github.event.label.name != 'personas-semantic' && github.run_id || 'keyed' }}
+  group: personas-semantic-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -21,8 +17,7 @@ jobs:
     name: Grounded writing semantics
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      contains(github.event.pull_request.labels.*.name, 'personas-semantic') &&
-      (github.event.action != 'labeled' || github.event.label.name == 'personas-semantic')
+      contains(github.event.pull_request.labels.*.name, 'personas-semantic')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
