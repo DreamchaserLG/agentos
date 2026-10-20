@@ -1,0 +1,61 @@
+name: Persona semantic acceptance
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+# Opening, reopening or pushing to a labelled pull request, or adding the
+# personas-semantic label, requests the keyed run, and a newer request cancels the
+# older one. Adding any other label keys a group of its own, its run id, so it
+# never cancels a keyed run, and its job is skipped, so it spends nothing.
+concurrency:
+  group: personas-semantic-${{ github.event.pull_request.number }}-${{ github.event.action == 'labeled' && github.event.label.name != 'personas-semantic' && github.run_id || 'keyed' }}
+  cancel-in-progress: true
+
+jobs:
+  semantic:
+    name: Grounded writing semantics
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'personas-semantic') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'personas-semantic')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build the package
+        run: pnpm run build
+      - name: Check every acceptance module
+        run: >-
+          pnpm exec tsc --noEmit --allowImportingTsExtensions
+          --module NodeNext --moduleResolution NodeNext --target ES2022 --skipLibCheck
+          scripts/personas/run-semantic.ts scripts/personas/semantic.acceptance.ts
+      - name: Run real grounded writing acceptance
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PERSONAS_COMMIT: ${{ github.event.pull_request.head.sha }}
+          PERSONAS_REPORT_DIR: ${{ runner.temp }}/personas-semantic
+        run: node --experimental-strip-types scripts/personas/run-semantic.ts
+      - name: Preserve synthetic acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: personas-semantic-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/personas-semantic
+          if-no-files-found: error
+          retention-days: 30
