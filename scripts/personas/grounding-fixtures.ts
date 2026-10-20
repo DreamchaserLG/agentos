@@ -23,7 +23,7 @@ export const GROUNDING_FIXTURES: readonly GroundingFixture[] = [
     ],
     accepted: [
       'The launch is planned for Friday at 14:00 and is not approved. The security review is still needed; its owner is unresolved.',
-      'Open: who will own the security review? No owner has agreed. The planned launch time is Friday at 14:00, with approval still outstanding.',
+      'Open: who will own the security review? It is still needed, and no owner has agreed. The planned launch time is Friday at 14:00, with approval still outstanding.',
     ],
     rejected: [
       'The launch is planned for Friday at 14:00 and is not approved. The security review is still needed and has no owner. Suggestion: hire an outside reviewer.',
