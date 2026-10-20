@@ -35,6 +35,7 @@ const common = {
 const writerTask = [
   'Write short meeting notes from the supplied transcript.',
   'Preserve every stated decision, condition, time, amount and unresolved question.',
+  'Report plans and commitments as what was said will happen, never as instructions to the reader.',
   'Do not identify speakers in authored notes. Do not invent suggestions, owners or missing decisions.',
   'Return only the notes.',
 ].join('\n');
