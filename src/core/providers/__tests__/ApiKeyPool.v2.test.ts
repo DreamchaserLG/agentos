@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiKeyPool, keyFingerprint, keyPoolStrategyFromEnv, type ProbeResult } from '../ApiKeyPool.js';
+import { ApiKeyPool, keyFingerprint, keyPoolStrategyFromEnv, type ApiKeyPoolConfig, type ProbeResult } from '../ApiKeyPool.js';
 import { InMemoryKeyPoolStateStore, type KeyState } from '../KeyPoolStateStore.js';
 import type { ILogger } from '../../logging/index.js';
 
@@ -321,6 +321,32 @@ describe('ApiKeyPool v2', () => {
       }
       const equal = new ApiKeyPool('sk_a,sk_b', { primaryWeight: 1 });
       expect([equal.next(), equal.next(), equal.next()]).toEqual(['sk_a', 'sk_b', 'sk_a']);
+    });
+
+    it('refuses a timing above 2147483647 ms, the longest delay a timer keeps, and takes that value itself', () => {
+      // Node runs a timer whose delay is above 2147483647 ms after 1 ms (doc/api/timers.md, setTimeout): such a load or
+      // store deadline timed out at once, such a probe timeout made every probe unknown, and such a recheck re-armed the
+      // timer every millisecond.
+      const longest = 2_147_483_647;
+      const each = (ms: number): Array<[string, ApiKeyPoolConfig]> => [
+        ['cooldownMs', { cooldownMs: ms }],
+        ['recheckMs', { recheckMs: ms }],
+        ['maxRecheckMs', { maxRecheckMs: ms }],
+        ['maxRetryAfterMs', { maxRetryAfterMs: ms }],
+        ['probeTimeoutMs', { probeTimeoutMs: ms }],
+        ['loadTimeoutMs', { loadTimeoutMs: ms }],
+        ['storeTimeoutMs', { storeTimeoutMs: ms }],
+      ];
+      for (const tooLong of [longest + 1, Number.MAX_SAFE_INTEGER]) {
+        for (const [name, config] of each(tooLong)) expect(() => new ApiKeyPool('sk_a,sk_b', config), `${name} ${tooLong}`).toThrow(RangeError);
+      }
+      for (const [name, config] of each(longest)) expect(() => new ApiKeyPool('sk_a,sk_b', config), name).not.toThrow();
+      const pool = new ApiKeyPool('sk_a,sk_b', { recheckMs: 1000 });
+      const before = vi.getTimerCount();
+      expect(() => pool.startRechecks(longest + 1)).toThrow(RangeError);
+      expect(vi.getTimerCount()).toBe(before);
+      const stop = pool.startRechecks(longest);
+      stop();
     });
 
     it('keeps one timer per pool: a second start replaces the first, and its stop ends it', () => {

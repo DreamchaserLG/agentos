@@ -196,6 +196,19 @@ describe('key pool defaults on the generateText path', () => {
     log.mockRestore();
   });
 
+  it('refuses a timing above 2147483647 ms in the defaults when the provider starts, where its load deadline would have passed at once', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.stubEnv('OPENAI_API_KEY', 'sk_pooltest_omicron_0025,sk_pooltest_pi_0026');
+    // A host's way of saying "no deadline": Node runs a timer that long after 1 ms, so every pool would start fresh,
+    // its rows ignored.
+    setKeyPoolDefaults({ store: new InMemoryKeyPoolStateStore(), loadTimeoutMs: Number.MAX_SAFE_INTEGER });
+    const failure = await createProviderManager(resolveProvider('openai', 'gpt-4o')).catch((e: unknown) => e);
+    expect(failure).toMatchObject({ name: 'ProviderInitializationError', providerId: 'openai' });
+    expect((failure as { cause?: unknown }).cause).toBeInstanceOf(RangeError);
+    expect(cachedProviderManagerCount()).toBe(0);
+    error.mockRestore();
+  });
+
   it('names no pool for an override, so the store does not apply to it', () => {
     vi.stubEnv('OPENAI_API_KEY', 'sk_pooltest_env_0003');
     const resolved = resolveProvider('openai', 'gpt-4o', { apiKey: 'sk_pooltest_override_0004' });

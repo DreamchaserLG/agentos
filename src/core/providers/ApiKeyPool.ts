@@ -131,14 +131,27 @@ export function keyPoolStrategyFromEnv(providerId?: string): Pick<ApiKeyPoolConf
 }
 
 /**
- * A timing option as a positive, finite number of milliseconds, or the default when it is not given. Anything else
- * is refused: a zero or negative recheck makes every failed key due at once and an interval of zero fires without
- * pause, so a probe would follow a probe; a zero probe timeout makes every probe unknown.
+ * The longest delay a timer keeps, 2147483647 ms (about 24.8 days). Node sets a larger delay to 1 ms
+ * (https://nodejs.org/api/timers.html, setTimeout and setInterval), and browsers convert the delay to a signed
+ * 32-bit integer, so a larger one overflows (https://developer.mozilla.org/en-US/docs/Web/API/Window/setTimeout,
+ * Maximum delay value).
+ */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/**
+ * A timing option as a positive, finite number of milliseconds no greater than {@link MAX_TIMER_MS}, or the default
+ * when it is not given. Anything else is refused: a zero or negative recheck makes every failed key due at once and
+ * an interval of zero fires without pause, so a probe would follow a probe; a zero probe timeout makes every probe
+ * unknown. A value above the ceiling does the same through the timer that runs it after 1 ms: a load or store
+ * deadline that passes at once, a probe timeout that makes every probe unknown, a recheck timer that fires again
+ * every millisecond.
  */
 function positiveMs(name: string, value: number | undefined, fallback: number): number {
   if (value === undefined) return fallback;
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    throw new RangeError(`ApiKeyPool: ${name} must be a positive number of milliseconds (got ${String(value)})`);
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > MAX_TIMER_MS) {
+    throw new RangeError(
+      `ApiKeyPool: ${name} must be a positive number of milliseconds no greater than ${MAX_TIMER_MS} (got ${String(value)})`,
+    );
   }
   return value;
 }
