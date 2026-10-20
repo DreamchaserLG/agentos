@@ -299,7 +299,7 @@ describe('GMI turn through the real completion gateway', () => {
     expect(system.split('The JSON MUST conform to this JSON Schema:')).toHaveLength(2);
   });
 
-  it("a structured reply answered by a hop whose payload carries no schema (Claude Sonnet 5.5) reports its enforcement as 'prompt_only'", async () => {
+  it("a structured reply answered by a Claude Sonnet 5.5 hop on the JSON output format reports 'provider_schema'", async () => {
     const k = key();
     const s = script('anthropic', k, { replies: [reply.text('{"city":"Lyon"}')] });
     const { gmi } = await createScriptedGmi({
@@ -307,9 +307,25 @@ describe('GMI turn through the real completion gateway', () => {
       persona: { defaultProviderId: 'anthropic', defaultModelId: 'claude-sonnet-5-5' },
     });
     const { output } = await runTurn(gmi, textTurn('t1', 'Where?', { options: { structuredReply: { schema: z.object({ city: z.string() }), name: 'place' } } }));
+    // The marker rides with route json_schema: the payload carried the schema, and the JSON text answer is the object.
+    expect(s.seen[0].options.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'json_schema' });
+    expect(output.structuredOutput).toMatchObject({ value: { city: 'Lyon' }, meta: { valid: true, enforcement: 'provider_schema' } });
+  });
+
+  it("a structured reply answered by a Claude Sonnet 5.5 hop whose schema the JSON output format cannot carry (a record) reports 'prompt_only'", async () => {
+    const k = key();
+    const s = script('anthropic', k, { replies: [reply.text('{"city":"Lyon","scores":{"a":1}}')] });
+    const { gmi } = await createScriptedGmi({
+      gateway: createCompletionGateway({ apiKey: k, fallbackProviders: [] }),
+      persona: { defaultProviderId: 'anthropic', defaultModelId: 'claude-sonnet-5-5' },
+    });
+    const { output } = await runTurn(
+      gmi,
+      textTurn('t1', 'Where?', { options: { structuredReply: { schema: z.object({ city: z.string(), scores: z.record(z.string(), z.number()) }), name: 'place' } } }),
+    );
     // No forced tool and no payload: the schema reached the model in the prompt alone.
     expect(s.seen[0].options.responseFormat).toBeUndefined();
-    expect(output.structuredOutput).toMatchObject({ value: { city: 'Lyon' }, meta: { valid: true, enforcement: 'prompt_only' } });
+    expect(output.structuredOutput).toMatchObject({ value: { city: 'Lyon', scores: { a: 1 } }, meta: { valid: true, enforcement: 'prompt_only' } });
   });
 
   it("a structured reply answered by a hop whose payload carries the schema (OpenAI's strict json_schema) reports 'provider_schema'", async () => {
@@ -333,5 +349,53 @@ describe('GMI turn through the real completion gateway', () => {
     const { output } = await runTurn(gmi, textTurn('t1', 'Where?', { options: { structuredReply: { schema: z.object({ city: z.string() }), name: 'place' } } }));
     expect(openRouter.bodies.map((body) => body.response_format?.type)).toEqual(['json_schema', 'json_object']);
     expect(output.structuredOutput).toMatchObject({ value: { city: 'Lyon' }, meta: { valid: true, enforcement: 'prompt_only' } });
+  });
+
+  it("a structured reply answered by a Claude Sonnet 4.6 hop with a record schema (outside the JSON output format) takes the forced tool and reports 'forced_tool'", async () => {
+    const k = key();
+    const s = script('anthropic', k, { replies: [reply.schemaTool('place', { city: 'Lyon', scores: { a: 1 } })] });
+    const { gmi, processToolCall } = await createScriptedGmi({
+      gateway: createCompletionGateway({ apiKey: k, fallbackProviders: [] }),
+      persona: { defaultProviderId: 'anthropic', defaultModelId: 'claude-sonnet-4-6' },
+    });
+    const { output } = await runTurn(
+      gmi,
+      textTurn('t1', 'Where?', { options: { structuredReply: { schema: z.object({ city: z.string(), scores: z.record(z.string(), z.number()) }), name: 'place' } } }),
+    );
+    expect(s.seen[0].options.responseFormat).toMatchObject({ _agentosUseToolForStructuredOutput: true, route: 'forced_tool', tool: { name: 'place' } });
+    expect(output.structuredOutput).toMatchObject({ value: { city: 'Lyon', scores: { a: 1 } }, meta: { valid: true, enforcement: 'forced_tool' } });
+    expect(processToolCall).not.toHaveBeenCalled();
+  });
+
+  it("a structured reply whose hop's provider sent the schema as a forced tool (its chunks say schemaRoute forced_tool, as a citations request does) reports 'forced_tool'", async () => {
+    const k = key();
+    const sent = reply.schemaTool('place', { city: 'Lyon' }).map((chunk) => ({ ...chunk, schemaRoute: 'forced_tool' }));
+    const s = script('anthropic', k, { replies: [sent] });
+    const { gmi, processToolCall } = await createScriptedGmi({
+      gateway: createCompletionGateway({ apiKey: k, fallbackProviders: [] }),
+      persona: { defaultProviderId: 'anthropic', defaultModelId: 'claude-sonnet-4-6' },
+    });
+    const { output } = await runTurn(gmi, textTurn('t1', 'Where?', { options: { structuredReply: { schema: z.object({ city: z.string() }), name: 'place' } } }));
+    // The marker expected the JSON output format; the provider's chunks say what it sent.
+    expect(s.seen[0].options.responseFormat).toMatchObject({ route: 'json_schema' });
+    expect(output.structuredOutput).toMatchObject({ value: { city: 'Lyon' }, meta: { valid: true, enforcement: 'forced_tool' } });
+    expect(processToolCall).not.toHaveBeenCalled();
+  });
+
+  it('a step whose JSON-output-format answer was cut off at the output limit finishes with length and its own text, and carries no structuredOutput', async () => {
+    const k = key();
+    script('anthropic', k, { replies: [reply.cutOff('{"city":"Ly')] });
+    const { gmi } = await createScriptedGmi({
+      gateway: createCompletionGateway({ apiKey: k, fallbackProviders: [] }),
+      persona: { defaultProviderId: 'anthropic', defaultModelId: 'claude-sonnet-5-5' },
+    });
+    const { chunks, output } = await runTurn(
+      gmi,
+      textTurn('t1', 'Where?', { options: { structuredReply: { schema: z.object({ city: z.string() }), name: 'place', maxRetries: 0, onExhausted: 'return_invalid' } } }),
+    );
+    const step = of(chunks, GMIOutputChunkType.STEP_FINISHED)[0]?.content as { finishReason?: string; text?: string; structuredOutput?: unknown };
+    expect(step).toMatchObject({ finishReason: 'length', text: '{"city":"Ly' });
+    expect(step.structuredOutput).toBeUndefined();
+    expect(output.structuredOutput).toMatchObject({ meta: { valid: false } });
   });
 });

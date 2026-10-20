@@ -500,6 +500,7 @@ export {
   parseModelString,
   resolveProvider,
   resolveModelOption,
+  shutdownProviderManagers,
   ProviderInitializationError,
 } from './api/model.js';
 export { PROVIDER_DEFAULTS, autoDetectProvider } from './api/runtime/provider-defaults.js';
@@ -555,6 +556,8 @@ export {
   isQuotaError,
   retryAfterMs as retryAfterHeaderMs,
 } from './core/providers/index.js';
+export { setKeyPoolDefaults, getKeyPoolDefaults } from './api/keyPoolDefaults.js';
+export type { KeyPoolDefaults } from './api/keyPoolDefaults.js';
 export type {
   ApiKeyPoolConfig,
   ProbeResult as KeyProbeResult,

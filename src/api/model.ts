@@ -8,6 +8,7 @@
  * {@link streamText}.
  */
 import { createHash } from 'node:crypto';
+import { keyPoolConfigFor, keyPoolDefaultsVersion } from './keyPoolDefaults.js';
 
 import { AIModelProviderManager } from '../core/llm/providers/AIModelProviderManager.js';
 import { baseUrlCredentials } from '../core/llm/providers/url-secrets.js';
@@ -39,6 +40,11 @@ export interface ResolvedProvider {
   apiKey?: string;
   /** Base URL override forwarded to the provider SDK. */
   baseUrl?: string;
+  /**
+   * The key pool's id for a key read from the environment, `<providerId>:<ENV_VAR>`, under which the pool's state
+   * persists when a host set a store with `setKeyPoolDefaults()`; absent for an override or a global default.
+   */
+  poolId?: string;
 }
 
 const ENV_KEY_MAP: Record<string, string> = {
@@ -281,7 +287,7 @@ export function resolveProvider(
           `(routed as "anthropic/${orModelId}"). Set ANTHROPIC_API_KEY for direct access.`
         );
       }
-      return { providerId: 'openrouter', modelId: `anthropic/${orModelId}`, apiKey: orKey };
+      return { providerId: 'openrouter', modelId: `anthropic/${orModelId}`, apiKey: orKey, poolId: 'openrouter:OPENROUTER_API_KEY' };
     }
     throw new Error(`No API key for anthropic. Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY.`);
   }
@@ -291,7 +297,9 @@ export function resolveProvider(
     throw new Error(`No API key for ${providerId}. Set ${envVar} or pass apiKey.`);
   }
 
-  return { providerId, modelId, apiKey, baseUrl };
+  // A key read from the environment names its pool, so the pool's state can persist under that name.
+  const fromEnv = overrides?.apiKey === undefined && defApiKey === undefined && ENV_KEY_MAP[providerId] !== undefined;
+  return { providerId, modelId, apiKey, baseUrl, ...(fromEnv ? { poolId: `${providerId}:${ENV_KEY_MAP[providerId]}` } : {}) };
 }
 
 /**
@@ -607,6 +615,49 @@ export function cachedProviderManagerCount(): number {
 }
 
 /**
+ * The {@link shutdownProviderManagers} call in progress, if any. A manager
+ * {@link createProviderManager} builds while it runs waits for it, so the
+ * new manager's pools load the state the replaced pools are writing instead
+ * of the rows from before it.
+ */
+let shutdownInProgress: Promise<void> | undefined;
+
+/**
+ * Shuts down every provider manager {@link createProviderManager} has cached
+ * and empties the cache. Each provider's `shutdown()` closes its key pool,
+ * which stops the pool's recheck timer and writes the keys' standing at once,
+ * so a short-lived host (a CLI, a job) that calls this before it exits keeps
+ * the last quarter second of key state its pools would otherwise lose to the
+ * save debounce. A manager still initializing is awaited first; one whose
+ * initialization failed is skipped. Calls after this one build new managers
+ * as the first call did, and a manager built before it has finished waits
+ * for it, so its pools start from what the old pools wrote.
+ */
+export async function shutdownProviderManagers(): Promise<void> {
+  const pending = Array.from(managerCache.values());
+  managerCache.clear();
+  const shuttingDown = Promise.all(
+    pending.map(async (initializing) => {
+      let manager: AIModelProviderManager;
+      try {
+        manager = await initializing;
+      } catch {
+        return;
+      }
+      await manager.shutdown().catch(() => undefined);
+    }),
+  ).then(() => undefined);
+  const previous = shutdownInProgress;
+  const all = previous ? Promise.all([previous, shuttingDown]).then(() => undefined) : shuttingDown;
+  shutdownInProgress = all;
+  try {
+    await all;
+  } finally {
+    if (shutdownInProgress === all) shutdownInProgress = undefined;
+  }
+}
+
+/**
  * Thrown by {@link createProviderManager} when the requested provider did not
  * initialize: a rejected or revoked API key (the provider's model listing
  * answers 401), an unreachable endpoint, or a provider id the manager does
@@ -652,7 +703,12 @@ function httpStatusOf(error: unknown): number | undefined {
 
 /** The cache key: the provider, and a digest of its key and base URL, so the map holds no key. */
 function buildCacheKey(resolved: ResolvedProvider): string {
-  const digest = createHash('sha256').update(`${resolved.apiKey ?? ''}\n${resolved.baseUrl ?? ''}`).digest('hex');
+  // The pool id and the defaults' version are part of the key: the same key string from the environment (a named,
+  // persisted pool) and from an override (no pool id) builds two managers, and a change of the key pool defaults
+  // gives later calls a manager built with them.
+  const digest = createHash('sha256')
+    .update(`${resolved.apiKey ?? ''}\n${resolved.baseUrl ?? ''}\n${resolved.poolId ?? ''}\n${keyPoolDefaultsVersion()}`)
+    .digest('hex');
   return `${resolved.providerId}::${digest}`;
 }
 
@@ -689,6 +745,9 @@ export async function createProviderManager(
   }
 
   const pending = (async () => {
+    // A manager built while shutdownProviderManagers() runs waits for it: the replaced pools write their pending
+    // state first, so this manager's pools load that state rather than the rows from before it.
+    if (shutdownInProgress) await shutdownInProgress;
     const manager = new AIModelProviderManager();
 
     const providerConfig: Record<string, unknown> = {};
@@ -697,6 +756,9 @@ export async function createProviderManager(
       providerConfig.baseURL = resolved.baseUrl;
       providerConfig.baseUrl = resolved.baseUrl;
     }
+    // The host's key pool defaults (a store, a strategy) and the pool's id for a key from the environment.
+    const keyPool = keyPoolConfigFor(resolved.poolId);
+    if (keyPool) providerConfig.keyPool = keyPool;
 
     await manager.initialize({
       providers: [
