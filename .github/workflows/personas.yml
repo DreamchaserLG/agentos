@@ -41,6 +41,8 @@ jobs:
           pnpm exec tsc --noEmit --strict --allowImportingTsExtensions
           --module NodeNext --moduleResolution NodeNext --target ES2022 --skipLibCheck
           scripts/personas-public-entry.acceptance.ts scripts/personas/semantic.acceptance.ts
+          scripts/personas/run-semantic.ts scripts/personas/published-lock.acceptance.ts
+          scripts/personas/verify-release.ts
       - name: Import the built entry without a source alias
         run: node --experimental-strip-types --test scripts/personas-public-entry.acceptance.ts
       - name: Exercise semantic runner failures without credentials

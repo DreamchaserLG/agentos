@@ -37,7 +37,7 @@ jobs:
         run: pnpm run build
       - name: Check every acceptance module
         run: >-
-          pnpm exec tsc --noEmit --allowImportingTsExtensions
+          pnpm exec tsc --noEmit --strict --allowImportingTsExtensions
           --module NodeNext --moduleResolution NodeNext --target ES2022 --skipLibCheck
           scripts/personas/run-semantic.ts scripts/personas/semantic.acceptance.ts
       - name: Run real grounded writing acceptance
