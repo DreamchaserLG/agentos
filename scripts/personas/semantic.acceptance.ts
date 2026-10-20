@@ -78,9 +78,16 @@ test('fails on an invented generated answer after successful calibration', async
 
 test('does not interpret a malformed judgment as a rejection that passes calibration', async () => {
   for (const reply of [null, {}, { ...ungrounded, rationale: '' }, { ...ungrounded, grounded: 'false' }]) {
+    // Every other judgment is valid and correct, so only the malformed reply to a planted control can stop the run,
+    // and it must stop it as malformed, not as a verdict that failed or passed.
     await assert.rejects(runSemanticAcceptance({
-      write: async () => 'Unused', judge: async () => reply, record: async () => {},
-    }));
+      write: async ({ source }) => GROUNDING_FIXTURES.find((entry) => entry.source === source)!.accepted[0]!,
+      judge: async (input) => {
+        const verdict = await fakeJudge(input);
+        return verdict === ungrounded ? reply : verdict;
+      },
+      record: async () => {},
+    }), (error: unknown) => !(error instanceof Error && /semantic acceptance failed/.test(error.message)));
   }
 });
 
