@@ -25,7 +25,8 @@ const common = {
   provider: 'openai',
   effort: 'medium',
   maxTokens: 4096,
-  maxAttempts: 1,
+  // Three attempts a call: a transient provider error (HTTP 5xx, 429, a network failure) is retried; a judged failure never is.
+  maxAttempts: 3,
   requestTimeout: 120_000,
   fallbackProviders: [],
   cache: false as const,
