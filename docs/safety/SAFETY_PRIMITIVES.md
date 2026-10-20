@@ -100,15 +100,18 @@ The 5-minute window on 402 reflects operational reality: credits might get toppe
 
 ### Error classification
 
-The registry reads HTTP status from three sources, in order:
+The registry reads HTTP status from four sources, in order:
 
 1. `[NNN] ...` prefix in `error.message` — the shape [`OpenRouterProvider`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/implementations/OpenRouterProvider.ts) decorates its errors with so downstream regex-based routing can find them.
-2. `error.statusCode` numeric property — [`OpenRouterProviderError`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/errors/OpenRouterProviderError.ts) sets this explicitly.
+2. `error.statusCode` numeric property.
 3. `error.status` numeric property — the Anthropic and OpenAI SDK shape.
+4. `error.httpStatus` numeric property — the shape of AgentOS's own provider errors ([`OpenRouterProviderError`](https://github.com/framerslab/agentos/blob/master/src/core/llm/providers/errors/OpenRouterProviderError.ts), `OpenAIProviderError`, `AnthropicProviderError`, `GeminiProviderError` and the rest).
 
 If none of those resolves, the error is treated as the conservative transient class (5-failure threshold, 60 s cooldown). Better to under-protect on a one-off network blip than lock out a healthy provider.
 
 Errors that judge the request rather than the provider do not count: a 4xx other than 401, 402, 403, 408 and 429 (a malformed body, an unknown model), a content-policy decline (`code` or `type` of `content_filter`, `content_policy_violation` or `safety_violations`), and a request larger than the model's context window.
+
+A provider whose [key pool](../KEY_ROTATION.md) has every key out throws `ALL_KEYS_FAILED`, whose `details.retryAfterMs` is the soonest a key may come back. One whose `retryAfterMs` is 0 (a key's probe is due or running) does not count, and any other opens the breaker for its class's window or for its `retryAfterMs`, whichever is shorter, so the breaker half-closes by the time a key of the pool may come back.
 
 ### Config
 

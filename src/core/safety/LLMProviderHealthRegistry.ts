@@ -32,7 +32,9 @@
  * usually means a bad key that needs an env change + redeploy, so a
  * longer cool-down avoids hammering the provider while the human fix
  * is in flight. 429 cool-downs are intentionally short because rate
- * limits typically lift in a single billing interval.
+ * limits typically lift in a single billing interval. A key pool's
+ * `ALL_KEYS_FAILED` opens the breaker for no longer than its
+ * `details.retryAfterMs`, the soonest a key of the pool may come back.
  *
  * **Design constraints.**
  * - Pure in-process state. No external store, no IPC. The registry is
@@ -42,8 +44,9 @@
  *   advance the clock deterministically in tests.
  * - The error classifier is intentionally forgiving: it reads from a
  *   `[NNN]` prefix in the message (the shape `OpenRouterProvider`
- *   already emits), from `error.statusCode`, OR from `error.status`
- *   (the Anthropic SDK shape). An error with no extractable code is
+ *   already emits), from `error.statusCode`, from `error.status` (the
+ *   Anthropic SDK shape), OR from `error.httpStatus` (AgentOS's own
+ *   provider errors). An error with no extractable code is
  *   treated as transient: better to under-protect than to lock out a
  *   healthy provider on a one-off network blip.
  * - `recordSuccess()` clears the streak counter but does NOT shorten a
@@ -132,10 +135,12 @@ const POLICY_TRANSIENT: ErrorPolicy = { threshold: 5, cooldownMs: 60_000 };
  * 1. `[NNN] ...` prefix in `error.message`: matches the shape
  *    `OpenRouterProvider` decorates its errors with so the existing
  *    `isRetryableError` regex can route on them.
- * 2. `error.statusCode` numeric property: `OpenRouterProviderError`
- *    sets this explicitly.
+ * 2. `error.statusCode` numeric property.
  * 3. `error.status` numeric property: the Anthropic / OpenAI SDK
  *    shape.
+ * 4. `error.httpStatus` numeric property: AgentOS's own provider
+ *    errors (`OpenAIProviderError`, `AnthropicProviderError`,
+ *    `OpenRouterProviderError` and the rest).
  *
  * Returns `null` when no status code can be extracted; the caller
  * treats that as the conservative transient class.
@@ -322,13 +327,38 @@ function isContentPolicyDecline(error: unknown): boolean {
  * provider yet: counted, it would re-open the breaker for another full window
  * at the very call that half-closed it, while the probe passes a second later.
  * Once the probe fails, the key's next recheck is later, `retryAfterMs` is
- * above 0, and the next such error trips the breaker as before.
+ * above 0, and the next such error trips the breaker for at most that long
+ * (see {@link poolReturnMs}).
  */
 function isRecheckDue(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
   const { code, details } = error as { code?: unknown; details?: unknown };
   if (code !== 'ALL_KEYS_FAILED' || !details || typeof details !== 'object') return false;
   return (details as { retryAfterMs?: unknown }).retryAfterMs === 0;
+}
+
+/**
+ * The `details.retryAfterMs` of a provider's `ALL_KEYS_FAILED`: the soonest a
+ * key of its pool may come back (a resting key's rest ends, a failed key's
+ * recheck is due), which bounds how long the breaker stays open for it. The
+ * pool probes a failed key at its recheck on its own timer, and the call that
+ * half-closes the breaker afterwards waits on that probe, so a window that ran
+ * past the recheck would only skip a provider whose key is back: a sparse call
+ * a second before the keys' recheck would otherwise hold the billing class
+ * open for its whole five minutes. Undefined for any other error, and for one
+ * that names no positive, finite time.
+ */
+function poolReturnMs(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const { code, details } = error as { code?: unknown; details?: unknown };
+  if (code !== 'ALL_KEYS_FAILED' || !details || typeof details !== 'object') return undefined;
+  const ms = (details as { retryAfterMs?: unknown }).retryAfterMs;
+  return typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? ms : undefined;
+}
+
+/** A breaker window for the log line: whole minutes from one minute up, else whole seconds (at least 1). */
+function describeWindow(ms: number): string {
+  return ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.max(1, Math.ceil(ms / 1000))} s`;
 }
 
 /**
@@ -403,7 +433,9 @@ export class LLMProviderHealthRegistry {
    * `ALL_KEYS_FAILED` whose `retryAfterMs` is 0 (a key's probe is due or
    * running) are ignored entirely (see {@link isContentPolicyDecline},
    * {@link isRequestTooLarge} and {@link isRecheckDue}): they neither trip the
-   * breaker nor count toward a streak.
+   * breaker nor count toward a streak. Any other `ALL_KEYS_FAILED` opens it
+   * for its class's window or its `retryAfterMs`, whichever is shorter (see
+   * {@link poolReturnMs}).
    */
   recordFailure(providerId: string, error: unknown): void {
     if (isContentPolicyDecline(error)) return;
@@ -423,6 +455,9 @@ export class LLMProviderHealthRegistry {
     // exempt: it wears client-error statuses but is an account-level outage.
     if (!quotaExhausted && isNonHealthClientError(status)) return;
     const policy = quotaExhausted ? POLICY_402 : policyForStatus(status);
+    // A dead key pool comes back when its soonest key does: the window never runs past that.
+    const returnMs = poolReturnMs(error);
+    const cooldownMs = returnMs === undefined ? policy.cooldownMs : Math.min(policy.cooldownMs, returnMs);
     const record = this.records.get(providerId) ?? this.makeRecord();
     record.failureCount += 1;
     record.lastStatusCode = status;
@@ -444,14 +479,14 @@ export class LLMProviderHealthRegistry {
           event: 'provider_breaker_open',
           providerId,
           statusCode: status ?? null,
-          cooldownMs: policy.cooldownMs,
+          cooldownMs,
           totalTrips: record.totalTrips,
         };
         if (isPolicyClass) {
           const classLabel = quotaExhausted ? 'quota exhausted' : `auth/billing class ${status}`;
           console.error(
             `[agentos] provider breaker OPEN for '${providerId}' (${classLabel}): ` +
-              `ALL traffic diverts to fallbacks for ${Math.round(policy.cooldownMs / 60_000)} min`,
+              `ALL traffic diverts to fallbacks for ${describeWindow(cooldownMs)}`,
             detail,
           );
         } else {
@@ -461,7 +496,7 @@ export class LLMProviderHealthRegistry {
           );
         }
       }
-      record.openUntil = Date.now() + policy.cooldownMs;
+      record.openUntil = Date.now() + cooldownMs;
     }
     // Most recent failure last: the map's order is the order the
     // per-credential records are dropped in.

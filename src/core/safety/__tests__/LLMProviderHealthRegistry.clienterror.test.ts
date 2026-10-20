@@ -382,4 +382,33 @@ describe('LLMProviderHealthRegistry: a key pool whose recheck is due has no verd
       errorSpy.mockRestore();
     }
   });
+
+  it("opens for no longer than its retryAfterMs, so the breaker half-closes when a key's recheck is due", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-19T12:00:00Z'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const reg = new LLMProviderHealthRegistry();
+      const billingPoolOut = (retryAfterMs: number) => ({
+        code: 'ALL_KEYS_FAILED',
+        httpStatus: 402,
+        message: 'Every Anthropic API key is out of rotation (billing).',
+        details: { kinds: ['billing'], retryAfterMs },
+      });
+      // The keys went out for billing 29 minutes 59 seconds ago: their recheck is a second away, the billing window 5
+      // minutes. The breaker opens for that second, so the call after the recheck reaches the pool and its probe.
+      reg.recordFailure('anthropic', billingPoolOut(1000));
+      expect(reg.getStats('anthropic')).toMatchObject({ state: 'open', cooldownRemainingMs: 1000 });
+      expect(errorSpy.mock.calls[0]?.[1]).toMatchObject({ event: 'provider_breaker_open', cooldownMs: 1000 });
+      vi.advanceTimersByTime(1000);
+      expect(reg.isOpen('anthropic')).toBe(false);
+
+      // A recheck later than the window keeps the window: the breaker opens for its 5 minutes, not for 30.
+      reg.recordFailure('anthropic', billingPoolOut(30 * 60_000));
+      expect(reg.getStats('anthropic')).toMatchObject({ state: 'open', cooldownRemainingMs: 5 * 60_000 });
+    } finally {
+      errorSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });
