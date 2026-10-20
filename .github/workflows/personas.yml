@@ -2,7 +2,7 @@ name: Personas
 
 on:
   push:
-    branches: [master, feat/notetaker-personality]
+    branches: [master]
   pull_request:
     branches: [master]
   workflow_dispatch: {}
@@ -38,7 +38,7 @@ jobs:
         run: pnpm run build
       - name: Check the public entry and semantic runner declarations
         run: >-
-          pnpm exec tsc --noEmit --allowImportingTsExtensions
+          pnpm exec tsc --noEmit --strict --allowImportingTsExtensions
           --module NodeNext --moduleResolution NodeNext --target ES2022 --skipLibCheck
           scripts/personas-public-entry.acceptance.ts scripts/personas/semantic.acceptance.ts
       - name: Import the built entry without a source alias
