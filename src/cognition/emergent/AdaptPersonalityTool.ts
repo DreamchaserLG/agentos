@@ -1,5 +1,5 @@
 /**
- * @fileoverview AdaptPersonalityTool ,  ITool implementation that enables agents
+ * @fileoverview AdaptPersonalityTool: the ITool implementation that enables agents
  * to mutate their own HEXACO personality traits at runtime with per-session
  * budget enforcement.
  *
@@ -43,12 +43,12 @@ import { readToolLearningContext, refusedSelfChange, selfChangeRefusal } from '.
  * The six valid HEXACO trait names. Only traits outside OPERATOR_ONLY_TRAITS may be self-modified.
  *
  * Each trait is a continuous value in the range [0, 1]:
- * - `openness`          ,  curiosity, creativity, willingness to explore
- * - `conscientiousness` ,  discipline, thoroughness, reliability
- * - `emotionality`      ,  emotional reactivity, empathy, anxiety
- * - `extraversion`      ,  sociability, energy, assertiveness
- * - `agreeableness`     ,  patience, tolerance, cooperation
- * - `honesty`           ,  sincerity, fairness, modesty
+ * - `openness`: curiosity, creativity, willingness to explore
+ * - `conscientiousness`: discipline, thoroughness, reliability
+ * - `emotionality`: emotional reactivity, empathy, anxiety
+ * - `extraversion`: sociability, energy, assertiveness
+ * - `agreeableness`: patience, tolerance, cooperation
+ * - `honesty`: sincerity, fairness, modesty
  */
 export const VALID_TRAITS = [
   'openness',
@@ -88,7 +88,7 @@ export interface PersonalityMutationStore {
   /** Persist a single mutation record. */
   record(mutation: RecordMutationInput): Promise<string> | string;
   /**
-   * Agent-scoped, idempotent strength aging (spec batch-1 C6). Optional , 
+   * Agent-scoped, idempotent strength aging (spec batch-1 C6). Optional:
    * older store implementations without it skip decay-on-adapt with a
    * warning; the concrete SQLite store implements it transactionally.
    */
@@ -328,7 +328,7 @@ export class AdaptPersonalityTool
       }
     }
 
-    // 3. Check session budget ,  track total |delta| per trait
+    // 3. Check session budget: track total |delta| per trait
     const { maxDeltaPerSession } = this.deps.config;
     const sessionDeltas = this.getSessionDeltas(context);
     const currentSessionTotal = sessionDeltas.get(trait) ?? 0;
@@ -354,7 +354,7 @@ export class AdaptPersonalityTool
     const previousValue = personality[trait] ?? 0.5;
     let newValue = previousValue + effectiveDelta;
 
-    // Clamp to [0, 1] range ,  may further reduce the effective delta
+    // Clamp to [0, 1] range, which may further reduce the effective delta
     if (newValue < 0) {
       newValue = 0;
       effectiveDelta = newValue - previousValue;
