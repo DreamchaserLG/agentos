@@ -75,10 +75,11 @@ try {
     spentUSD: budget.spentUSD(), tokens: budget.tokensUsed(),
   }, null, 2));
 } catch (error) {
+  const failure = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   await writeFile(join(directory, 'summary.json'), JSON.stringify({
-    status: 'failed', commit, writerModel, judgeModel,
-    failure: error instanceof Error ? error.name : 'UnknownError',
+    status: 'failed', commit, writerModel, judgeModel, failure,
     spentUSD: budget.spentUSD(), tokens: budget.tokensUsed(),
   }, null, 2));
+  console.error(`semantic acceptance failed: ${failure}`);
   process.exitCode = 1;
 }
