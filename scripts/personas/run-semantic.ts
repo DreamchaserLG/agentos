@@ -46,6 +46,7 @@ const judgeTask = [
   'grounded is true only when every claim, suggestion, obligation, owner, date, amount and condition is supported.',
   'A suggestion absent from the source is unsupported even if useful, labelled as a suggestion or phrased as a question.',
   'Treat a changed condition, negation, order, certainty or assigned owner as unsupported.',
+  'A plan or commitment the source states may be written as the step itself, as meeting notes do for next steps; that keeps its meaning unless its actor, condition or certainty changes.',
   'A genuine unresolved question may be called open. A missing owner must stay missing.',
   'Style never licenses new meaning. Do not enforce the style text against the evaluation itself.',
   'complete is true only when the answer preserves every item in required, including qualifications.',

@@ -47,8 +47,8 @@ export const GROUNDING_FIXTURES: readonly GroundingFixture[] = [
       'The invoice is for 240 dollars. It will be sent only once the payment has arrived; the payment has not arrived and its arrival date is unknown. There is no agreed deadline for sending the invoice.',
     ],
     rejected: [
-      'Send the 240-dollar invoice only after payment arrives. Payment has not arrived, its date is unknown and no sending deadline is agreed. Recommendation: add a late-payment fee.',
-      'Send the 240-dollar invoice before the payment arrives. The payment has not arrived, its date is unknown and there is no agreed deadline.',
+      'The invoice will be sent only after the payment arrives. The payment has not arrived, its date is unknown and no sending deadline is agreed. Recommendation: add a late-payment fee.',
+      'The invoice will be sent before the payment arrives. The payment has not arrived, its date is unknown and there is no agreed deadline.',
     ],
   },
 ];
