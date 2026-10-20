@@ -22,8 +22,8 @@ export const GROUNDING_FIXTURES: readonly GroundingFixture[] = [
       'The question about its owner is still unanswered.',
     ],
     accepted: [
-      'The launch is planned for Friday at 14:00 and is not approved. The security review is still needed; its owner is unresolved.',
-      'Open: who will own the security review? No owner has agreed. The planned launch time is Friday at 14:00, with approval still outstanding.',
+      'The launch is planned for Friday at 14:00 and is not approved. The security review is still needed and nobody has agreed to own it. Who will own it is still unanswered.',
+      'Open question: who will own the security review? There is no answer yet and nobody has agreed to own it. The review is still needed. The launch is planned for Friday at 14:00 and is not approved.',
     ],
     rejected: [
       'The launch is planned for Friday at 14:00 and is not approved. The security review is still needed and has no owner. Suggestion: hire an outside reviewer.',
