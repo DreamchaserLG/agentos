@@ -2,8 +2,9 @@
  * @file providers.spec.ts
  * @description The OpenAI provider's retry path, driven through its real request loop. A rate-limited attempt reaches
  * the host's logger as one `llm.retry` event with the status, the attempt and the scheduled wait, and the provider's
- * error text reaches neither the logger nor a standard stream. The wait itself is unchanged: a fractional
- * `Retry-After` is read as whole seconds, and the last attempt still waits before its error is thrown.
+ * error text reaches neither the logger nor a standard stream. The event carries the wait the provider schedules: a
+ * `Retry-After` in seconds before the next attempt. The last attempt schedules none, so its error ends the call at
+ * once and it writes no retry event.
  */
 
 import { Console } from 'node:console';
@@ -33,23 +34,25 @@ it('hands a rate-limit retry to the host without text or standard-stream output'
   expect(JSON.stringify(lines)).not.toContain('sentinel-words-7731');
   expect(stdout).not.toHaveBeenCalled(); expect(stderr).not.toHaveBeenCalled();
 });
-it.each([['61.9', 61_000], ['1.9', 1_000]] as const)('preserves Retry-After %s and the final-attempt wait', async (header, delay) => {
+it.each([['61', 61_000], ['1', 1_000]] as const)('waits out Retry-After %s before the next attempt and none after the last', async (header, delay) => {
   vi.useFakeTimers();
   const lines: Record<string, unknown>[] = [];
   setLogger(pino({ level: 'debug', base: undefined }, { write(line: string) { lines.push(JSON.parse(line)); } }));
+  const limited = () => new Response(JSON.stringify({ error: { message: 'sentinel-words-7731' } }), { status: 429, headers: { 'retry-after': header } });
   const fetcher = vi.fn()
     .mockResolvedValueOnce(new Response(JSON.stringify({ data: [] })))
-    .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'sentinel-words-7731' } }), { status: 429, headers: { 'retry-after': header } }));
+    .mockResolvedValueOnce(limited())
+    .mockResolvedValueOnce(limited());
   vi.stubGlobal('fetch', fetcher);
-  const provider = new OpenAIProvider(); await provider.initialize({ apiKey: 'test-key', maxRetries: 1 });
+  const provider = new OpenAIProvider(); await provider.initialize({ apiKey: 'test-key', maxRetries: 2 });
   let done = false;
   const result = provider.generateCompletion('gpt-4o', [{ role: 'user', content: 'hello' }], {}).then(
     () => { done = true; return 'resolved'; },
     () => { done = true; return 'rejected'; },
   );
-  await vi.advanceTimersByTimeAsync(delay - 1); expect(done).toBe(false);
+  await vi.advanceTimersByTimeAsync(delay - 1); expect(done).toBe(false); expect(fetcher).toHaveBeenCalledTimes(2);
   await vi.advanceTimersByTimeAsync(1); expect(await result).toBe('rejected');
-  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(fetcher).toHaveBeenCalledTimes(3);
   expect(lines.filter(line => line.event === 'llm.retry')).toEqual([
     expect.objectContaining({ provider: 'openai', status: 429, attempt: 1, waitMs: delay }),
   ]);

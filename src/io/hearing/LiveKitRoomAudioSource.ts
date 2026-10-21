@@ -80,6 +80,10 @@ export interface LiveKitTrackPublicationLike {
 export interface LiveKitParticipantLike {
   readonly identity: string;
   readonly trackPublications: ReadonlyMap<string, LiveKitTrackPublicationLike>;
+  /** rtc-node's `ParticipantKind`: `3` (`SIP`) for a phone caller LiveKit SIP brought into the room. */
+  readonly kind?: number;
+  /** The participant's attributes, as a string key-value store. */
+  readonly attributes?: Readonly<Record<string, string>>;
 }
 
 /** A text stream reader (rtc-node `TextStreamReader`). */
@@ -90,6 +94,8 @@ export interface LiveKitTextStreamReaderLike {
    * `close()`); a `readAll()` in progress then ends.
    */
   close?(): Promise<void>;
+  /** Native rtc-node text chunks; strict call transports require this bounded-read path. */
+  [Symbol.asyncIterator]?(): AsyncIterator<string>;
 }
 
 /** A text stream handler as rtc-node's `Room.registerTextStreamHandler` takes it. */
@@ -135,8 +141,10 @@ export interface LiveKitRtcModule {
 }
 
 /**
- * Loads `@livekit/rtc-node`, the optional peer the LiveKit room audio source
- * and transport run on.
+ * Loads `@livekit/rtc-node`, the optional peer the LiveKit room audio source,
+ * the transport and its publisher run on. The default import carries
+ * `webpackIgnore` and `@vite-ignore`, so a bundled server leaves it to the
+ * runtime.
  *
  * @param importer - How to import a module; the default is a dynamic `import()`.
  * @returns The module.
@@ -144,7 +152,7 @@ export interface LiveKitRtcModule {
  *   fails; the import's own error is its `cause`.
  */
 export async function loadLiveKitRtc(
-  importer: (specifier: string) => Promise<unknown> = (specifier) => import(/* @vite-ignore */ specifier)
+  importer: (specifier: string) => Promise<unknown> = (specifier) => import(/* webpackIgnore: true */ /* @vite-ignore */ specifier)
 ): Promise<LiveKitRtcModule> {
   try {
     return (await importer(RTC_NODE)) as LiveKitRtcModule;
@@ -187,6 +195,8 @@ export interface LiveKitRoomAudioSourceOptions {
    * both; this module imports it on first use when omitted.
    */
   rtc?: LiveKitRtcModule;
+  /** Call-profile boundary: the native stream must return the requested mono rate without another conversion stage. */
+  strictMono?: boolean;
 }
 
 /** Whether a publication is the participant's microphone: audio, published with the microphone source. */
@@ -211,6 +221,7 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
   private isClosed = false;
   private started = false;
   private listening = false;
+  private closing: Promise<void> | undefined;
   /** The reads waiting for a track; a subscription or the end wakes every one of them. */
   private readonly waiters = new Set<() => void>();
 
@@ -275,7 +286,7 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
     };
   }
 
-  /** Stops reading: cancels the stream, ends the iteration and leaves the room's events. Idempotent. */
+  /** Stops accepting frames synchronously; cancellation acknowledgement remains observable. */
   close(): void {
     if (this.isClosed) return;
     this.isClosed = true;
@@ -283,16 +294,13 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
       this.options.room.off(this.rtc.RoomEvent.TrackSubscribed, this.onTrackSubscribed);
       this.options.room.off(this.rtc.RoomEvent.Disconnected, this.onDisconnected);
     }
-    const reader = this.reader;
-    this.reader = undefined;
-    this.readingTrack = undefined;
-    if (reader) {
-      reader.cancel().catch(() => {
-        // The stream already ended; cancelling it has nothing left to release.
-      });
-    }
+    const reader = this.reader; this.reader = undefined; this.readingTrack = undefined;
+    this.closing = Promise.resolve().then(() => reader?.cancel()).then(() => {});
+    void this.closing.catch(() => {});
     this.wakeUp();
   }
+  /** Resolves only when the native input reader acknowledges cancellation. */
+  whenClosed(): Promise<void> { return this.closing ?? Promise.reject(new Error('audio source still open')); }
 
   /** The next frame; a read that fails closes the source, then rejects. */
   private async next(): Promise<IteratorResult<AudioFrame>> {
@@ -401,6 +409,7 @@ export class LiveKitRoomAudioSource implements AsyncIterable<AudioFrame> {
 
   /** Int16 to Float32 in [-1, 1], mixed down to one channel, on a clock that only moves forward. */
   private toFrame(frame: LiveKitAudioFrameLike): AudioFrame {
+    if (this.options.strictMono && (frame.channels !== 1 || frame.sampleRate !== this.options.sampleRate || !Number.isSafeInteger(frame.samplesPerChannel) || frame.samplesPerChannel < 1 || frame.data.length !== frame.samplesPerChannel)) throw new Error('livekit input format refused');
     const channels = Math.max(1, frame.channels);
     const count = frame.samplesPerChannel;
     const samples = new Float32Array(count);

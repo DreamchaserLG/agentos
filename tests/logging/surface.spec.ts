@@ -1,6 +1,6 @@
 /**
  * @file surface.spec.ts
- * @description The logging hand-over: `createLogger` keeps returning the factory's own object, lazy handles follow
+ * @description The logging hand-over: `createLogger` calls the factory at once and delegates to its object, lazy handles follow
  * every setter at their next write, a sink's fault never reaches the caller while a validation fault does under
  * test, two evaluations of the module share one state, and the level comes from the environment.
  */
@@ -22,13 +22,15 @@ function sink() {
 afterEach(() => { resetLoggerFactory(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 describe('the logging hand-over', () => {
-  it('keeps immediate factory identity and snapshots while lazy children follow every setter', () => {
+  it('calls the factory at once and keeps its object while lazy children follow every setter', () => {
     const first = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const factory = vi.fn(() => first);
     setLoggerFactory(factory);
     const old = createLogger('old', { arbitrary: 1 });
     expect(factory).toHaveBeenCalledExactlyOnceWith('old', { arbitrary: 1 });
-    expect(old).toBe(first);
+    // A guard for content-safe telemetry wraps the factory's object; its calls reach that object.
+    old.warn('legacy warning');
+    expect(first.warn).toHaveBeenCalledExactlyOnceWith('legacy warning');
     const handle = lazyLogger('test').child({ component: 'child' });
     const next = sink();
     setLogger(next.logger);

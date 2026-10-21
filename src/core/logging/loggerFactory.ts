@@ -1,12 +1,15 @@
 /**
- * @fileoverview How a host hands AgentOS its logger, and the handles AgentOS writes through.
+ * @fileoverview How a host hands AgentOS its logger, the handles AgentOS writes through, and the
+ * guard that keeps every logger `createLogger` hands out inside content-safe telemetry.
  *
  * `setLogger` takes a pino-shaped logger, `setLoggerFactory` takes a factory of `ILogger`s,
  * `setLogger(null)` silences AgentOS, and `resetLoggerFactory` returns to the default pino
- * root, which is built on its first use. The last setter wins. `createLogger` keeps its
- * contract: it calls the current factory at once and returns that factory's object.
- * `lazyLogger` returns a typed handle that reads the current target at each write, and so do
- * its children.
+ * root, which is built on its first use. The last setter wins. `createLogger` calls the
+ * current factory at once and returns a guard over that factory's object: its calls reach the
+ * object until content-safe telemetry is enabled, and from then on each becomes one fixed
+ * event, even on a logger made earlier. `lazyLogger` returns a typed handle that reads the
+ * current target at each write, and so do its children; while content-safe telemetry is on,
+ * each of their lines is one fixed event as well.
  *
  * @module agentos/core/logging/loggerFactory
  */
@@ -17,6 +20,7 @@ import type { AgentOSEvents, AgentOSContext } from './events.js';
 import { AGENTOS_CONTEXT } from './events.js';
 import { getLoggingState, type LoggerFactory, type Target } from './state.js';
 import { checkContext, defaultRoot, forward, isValidationError } from './forward.js';
+import { emitContentSafeLog, isContentSafeTelemetryEnabled } from './contentSafeTelemetry.js';
 export type { LoggerFactory } from './state.js';
 
 /**
@@ -40,6 +44,38 @@ export function setLogger(logger: Logger | null): void {
     }
   }
   getLoggingState().target = logger === null ? { mode: 'silent' } : { mode: 'logger', logger };
+}
+
+/**
+ * Wraps `raw` so each call is checked against content-safe telemetry when it is made. While the mode is off, a call
+ * goes to `raw` with the caller's own arguments, a `fatal` call to `raw.error` when `raw` has no `fatal`; while it is
+ * on, it becomes one fixed event and `raw` is not called.
+ */
+function guarded(raw?: ILogger): ILogger {
+  const logger: ILogger = {
+    info(...args: Parameters<ILogger['info']>) {
+      if (!emitContentSafeLog('info')) raw?.info(...args);
+    },
+    warn(...args: Parameters<ILogger['warn']>) {
+      if (!emitContentSafeLog('warn')) raw?.warn(...args);
+    },
+    error(...args: Parameters<ILogger['error']>) {
+      if (!emitContentSafeLog('error')) raw?.error(...args);
+    },
+    debug(...args: Parameters<NonNullable<ILogger['debug']>>) {
+      if (!emitContentSafeLog('debug')) raw?.debug?.(...args);
+    },
+    fatal(...args: Parameters<NonNullable<ILogger['fatal']>>) {
+      if (emitContentSafeLog('error')) return;
+      if (raw?.fatal) raw.fatal(...args);
+      else raw?.error(...args);
+    },
+    child(bindings) {
+      if (isContentSafeTelemetryEnabled()) return logger;
+      return guarded(raw?.child ? raw.child(bindings) : raw);
+    },
+  };
+  return logger;
 }
 
 /**
@@ -82,20 +118,24 @@ function adapter(target: () => Target, bindings: Record<string, any>, strict: bo
 }
 
 /**
- * Returns a component's logger. With a factory set, it calls the factory at once and returns
- * that factory's object. Otherwise it returns a child of the default root, or an adapter over
- * the logger or the silence set now; an object it returned keeps that target after a later
- * setter.
+ * Returns a component's logger: a guard over the logger the current target gives. With a factory
+ * set, it calls the factory at once; otherwise it takes a child of the default root, or an
+ * adapter over the logger or the silence set now, and that logger keeps its target after a later
+ * setter. The guard's calls reach that logger, with the caller's arguments, until content-safe
+ * telemetry is enabled; from then on each call becomes one fixed event for the host's sink, even
+ * on a logger made earlier, and `child` returns the same logger. While the mode is on, the
+ * factory is not called and nothing is made.
  *
  * @param name - The component's name.
  * @param bindings - Bindings for every line the logger writes.
  * @returns The component's logger.
  */
 export function createLogger(name: string, bindings?: Record<string, any>): ILogger {
+  if (isContentSafeTelemetryEnabled()) return guarded();
   const target = getLoggingState().target;
-  if (target.mode === 'factory') return target.factory(name, bindings);
-  if (target.mode === 'default') return defaultRoot().child({ component: name, ...bindings });
-  return adapter(() => target, { component: name, ...bindings }, false);
+  if (target.mode === 'factory') return guarded(target.factory(name, bindings));
+  if (target.mode === 'default') return guarded(defaultRoot().child({ component: name, ...bindings }));
+  return guarded(adapter(() => target, { component: name, ...bindings }, false));
 }
 
 /**

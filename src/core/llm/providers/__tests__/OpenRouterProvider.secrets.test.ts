@@ -263,9 +263,10 @@ describe('OpenRouterProvider keeps API keys out of errors and logs', () => {
     expect((failure as Error).message).toBe('[402] Insufficient credits');
     expectNoKeys(failure);
     expectNoKeys(logged);
-    // The stream was read and released, not kept in the error.
-    expect(bodies).toHaveLength(1);
-    expect(bodies[0].destroyed).toBe(true);
+    // Both keys answered 402, so two requests went out before ALL_KEYS_FAILED; each
+    // stream was read and released, not kept in the error.
+    expect(bodies).toHaveLength(2);
+    expect(bodies.every((body) => body.destroyed)).toBe(true);
   });
 
   it('when a streamed error body is cut off in the middle of a key', async () => {

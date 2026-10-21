@@ -26,9 +26,12 @@
  *
  * Each turn is gated by {@link checkBeforeAgentInput} over the input the
  * agent receives, the transcript of the arguments so far included, and the
- * agent is sent the input the check read. An agent the handler rejects, or
- * whose input the post-approval check blocks, sits that turn out; the
- * synthesizer still rules on the arguments that were made.
+ * agent is sent the input the check read. The post-approval check also reads
+ * the motion and each argument so far on its own. An agent the handler
+ * rejects, or whose input the post-approval check blocks, sits that turn out;
+ * the synthesizer still rules on the arguments that were made. A nested
+ * agency's turn that no seat of its own answered is sat out the same way.
+ * When no argument was made, no synthesizer runs and the text is `''`.
  *
  * @see {@link compileStrategy} -- the dispatcher that selects this compiler.
  * @see {@link compileReviewLoop} -- an alternative iterative strategy with explicit approval.
@@ -47,6 +50,9 @@ import {
   checkBeforeAgentInput,
   accumulateExtraUsage,
   buildAgentCallUsage,
+  callRecordExtras,
+  ownAgentInternals,
+  nestedRunUnanswered,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -78,6 +84,8 @@ type ResultUsageSnapshot = {
  * @param agents - Named roster of agent configs or pre-built `Agent` instances.
  * @param agencyConfig - Agency-level configuration providing fallback model/provider/tools.
  *   Must include `model` or `provider` for the synthesis step.
+ * @param mask - The call's mask in an agency with a pool: the synthesizer runs
+ *   as a seat does ({@link ownAgentInternals}).
  * @returns A {@link CompiledStrategy} with `execute` and `stream` methods.
  * @throws {AgencyConfigError} When no agency-level model/provider is available
  *   for the synthesis step.
@@ -94,6 +102,7 @@ type ResultUsageSnapshot = {
 export function compileDebate(
   agents: Record<string, BaseAgentConfig | Agent>,
   agencyConfig: AgencyOptions,
+  mask?: (error: unknown) => unknown,
 ): CompiledStrategy {
   if (!agencyConfig.model && !agencyConfig.provider) {
     throw new AgencyConfigError(
@@ -148,9 +157,13 @@ export function compileDebate(
               ].join('\n');
 
           // HITL: check the beforeAgent gate over the input this agent
-          // receives, the transcript included. The agent is sent the input
-          // the check read.
-          const gate = await checkBeforeAgentInput(name, debateContext, agentCalls, agencyConfig);
+          // receives, the transcript included, and over the motion and each
+          // argument so far on its own, since the input puts more text after
+          // each of them. The agent is sent the input the check read.
+          const gate = await checkBeforeAgentInput(name, debateContext, agentCalls, agencyConfig, [
+            prompt,
+            ...collectedArguments,
+          ]);
           if (gate.decision && !gate.decision.approved) {
             // Agent was rejected -- skip this agent in this round.
             continue;
@@ -161,6 +174,10 @@ export function compileDebate(
           const start = Date.now();
           const result = (await a.generate(gate.input, opts)) as Record<string, unknown>;
           const durationMs = Date.now() - start;
+
+          // A nested agency's run that no seat of its own answered made no
+          // argument: the agent sits the turn out, as a rejected one does.
+          if (nestedRunUnanswered(result)) continue;
 
           const resultText = (result.text as string) ?? '';
           const resultUsage = (result.usage as ResultUsageSnapshot) ?? {};
@@ -177,6 +194,7 @@ export function compileDebate(
             toolCalls: resultToolCalls,
             usage: buildAgentCallUsage(resultUsage),
             durationMs,
+            ...callRecordExtras(result),
           });
 
           totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
@@ -184,6 +202,14 @@ export function compileDebate(
           totalUsage.totalTokens += resultUsage.totalTokens ?? 0;
           accumulateExtraUsage(totalUsage, resultUsage);
         }
+      }
+
+      // No argument was made (every turn was rejected or blocked): there is
+      // nothing to rule on, and a judge sent an empty transcript would make a
+      // verdict up. The run returns no text, no call record and no usage,
+      // which the agency logs as a run no seat answered.
+      if (agentCalls.length === 0) {
+        return { text: '', agentCalls, usage: totalUsage };
       }
 
       // Synthesize all arguments into a JUDGE'S VERDICT, not a balanced
@@ -218,12 +244,15 @@ export function compileDebate(
         `Be direct. Pick a winner unless the transcript is genuinely tied.${synthInstructions}`,
       ].join('\n');
 
+      // In an agency with a pool, the synthesizer resolves every hop's key and
+      // masks what it answers as a seat does.
       const synthesizer = createAgent({
         model: agencyConfig.model,
         provider: agencyConfig.provider,
         apiKey: agencyConfig.apiKey,
         baseUrl: agencyConfig.baseUrl,
         maxSteps: 1,
+        ...ownAgentInternals(mask),
       });
 
       const synthesis = (await synthesizer.generate(synthPrompt, opts)) as unknown as Record<string, unknown>;

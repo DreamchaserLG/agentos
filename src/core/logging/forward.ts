@@ -15,6 +15,7 @@ import { getLoggingState } from './state.js';
 import { AGENTOS_CONTEXT, AGENTOS_EVENTS, valid, type ContextSchema, type EventMap } from './events.js';
 import { PinoLogger } from './PinoLogger.js';
 import { parseLogLevel } from './level.js';
+import { emitContentSafeLog } from './contentSafeTelemetry.js';
 
 /** Why a line was refused. A refusal line carries the reason, never the key or the value. */
 export type RefusalReason = 'unknown_event' | 'unknown_key' | 'bad_value' | 'bad_context';
@@ -110,7 +111,9 @@ export function defaultRoot(): PinoLogger {
  * A logger gets `logger[level]({ ...context, ...fields, event })`, with no message, and the
  * default root writes the same object. A factory's logger gets `(event, fields)`: at `error`
  * when it has no `fatal`, and not at all at `debug` when it has no `debug`. A silent target
- * gets nothing.
+ * gets nothing. While content-safe telemetry is on, any other target gets nothing either: the
+ * line becomes one fixed event for the host's sink (a `fatal` line at `error`), before any
+ * check, and nothing of it is read.
  *
  * @param target - Where the line goes.
  * @param level - The line's level.
@@ -121,6 +124,7 @@ export function defaultRoot(): PinoLogger {
  */
 export function forward(target: Target, level: Level, event: string, fields: Record<string, unknown>, context: Record<string, any>, strict = true): void {
   if (target.mode === 'silent') return;
+  if (emitContentSafeLog(level === 'fatal' ? 'error' : level)) return;
   const requestId = getLoggingState().requests.getStore()?.requestId;
   // Annotated: a spread keeps an index signature only when every part has one, so the inferred type would lose
   // the context's keys (component among them).

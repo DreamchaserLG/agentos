@@ -47,7 +47,7 @@ All paths below are under [`src/`](https://github.com/framerslab/agentos/tree/ma
 | `io/` | `channels/` · `hearing/` · `speech/` · `vision/` · `voice-pipeline/` · `media/` · `avatar/` · `segmentation/` | Messaging adapters, telephony and social posting; STT, VAD and TTS; OCR and image analysis; the real-time voice pipeline; image, video, music and SFX generation; avatars; image segmentation. The meeting-participant channel owns meeting runs, the capture interlock, transcript persistence and purging. |
 | `logging/` | — | `ILogger` and the logger factory |
 | `orchestration/` | `builders/` · `checkpoint/` · `compiler/` · `events/` · `hitl/` · `ir/` · `pipeline/` · `planner/` · `planning/` · `runtime/` · `tools/` · `turn-planner/` · `workflows/` | `workflow()`, `mission()` and `AgentGraph` builders, the graph IR, compiler and runtime, checkpoints, [`PlanningEngine`](https://github.com/framerslab/agentos/blob/master/src/orchestration/planner/PlanningEngine.ts), human-in-the-loop, the query, memory, ingest and read routers (`pipeline/`), the turn planner and the workflow engine |
-| `safety/` | `guardrails/` · `runtime/` · `sandbox/` · `provenance/` · `evaluation/` · `validation/` · `auth/` | Guardrails ([`IGuardrailService`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/IGuardrailService.ts), [`ParallelGuardrailDispatcher`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/ParallelGuardrailDispatcher.ts)), runtime safety ([`CircuitBreaker`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CircuitBreaker.ts), [`CostGuard`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts), [`StuckDetector`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/StuckDetector.ts)), code execution (`node:vm`) and [`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts) / [`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts), provenance and blockchain anchoring, evaluation and OpenTelemetry tracing |
+| `safety/` | `guardrails/` · `runtime/` · `sandbox/` · `provenance/` · `evaluation/` · `validation/` · `auth/` · `claims/` | Guardrails ([`IGuardrailService`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/IGuardrailService.ts), [`ParallelGuardrailDispatcher`](https://github.com/framerslab/agentos/blob/master/src/safety/guardrails/ParallelGuardrailDispatcher.ts)), runtime safety ([`CircuitBreaker`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CircuitBreaker.ts), [`CostGuard`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/CostGuard.ts), [`StuckDetector`](https://github.com/framerslab/agentos/blob/master/src/safety/runtime/StuckDetector.ts)), code execution (`node:vm`) and [`CLISubprocessBridge`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLISubprocessBridge.ts) / [`CLIRegistry`](https://github.com/framerslab/agentos/blob/master/src/safety/sandbox/subprocess/CLIRegistry.ts), provenance and blockchain anchoring, evaluation and OpenTelemetry tracing, and deterministic claim evidence ([`EvidenceClaimVerifier`](https://github.com/framerslab/agentos/blob/master/src/safety/claims/EvidenceClaimVerifier.ts)) |
 | `utils/` | — | Shared error helpers |
 
 ### Architecture Layers
@@ -318,7 +318,7 @@ Every descriptor carries an `id`, a `kind` and a `payload`, plus optional `prior
 | `provenance` | [`EXTENSION_KIND_PROVENANCE`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | provenance pack payload | Content anchoring provider |
 | `meeting-provider` | [`EXTENSION_KIND_MEETING_PROVIDER`](https://github.com/framerslab/agentos/blob/master/src/extensions/types.ts) | `IMeetingBotProvider` | Meeting participant registered by the host on `MeetingManager` |
 
-The other kinds are `response-processor`, `workflow-executor`, `persona`, `planning-strategy`, `hitl-handler`, `communication-channel`, `memory-provider`, `stt-provider`, `tts-provider`, `vad-provider`, `wake-word-provider`, `messaging-channel`, `http-handler`, `streaming-stt-provider`, `streaming-tts-provider` and `diarization-provider`.
+The other kinds are `response-processor`, `workflow-executor`, `persona`, `planning-strategy`, `hitl-handler`, `communication-channel`, `memory-provider`, `stt-provider`, `tts-provider`, `vad-provider`, `wake-word-provider`, `messaging-channel`, `http-handler`, `streaming-stt-provider`, `streaming-tts-provider`, `diarization-provider`, `endpoint-detector`, `bargein-handler`, `vad-session-provider` and `audio-endpoint-provider`.
 
 ### Guardrail Dispatch Model
 
@@ -382,7 +382,7 @@ A persona definition includes:
 
 ### HEXACO Trait Modulation
 
-The HEXACO model provides six personality dimensions. In cognitive memory (the traits a host passes as `CognitiveMemoryConfig.traits`), each one weights a content feature at encoding and scales one mechanism:
+The HEXACO model provides six personality dimensions. In cognitive memory (the traits a host passes as `CognitiveMemoryConfig.traits`), each one weights a content feature at encoding and scales one mechanism, and openness scales two:
 
 | HEXACO Trait | Range | Cognitive Effect |
 |---|---|---|
@@ -391,7 +391,7 @@ The HEXACO model provides six personality dimensions. In cognitive memory (the t
 | **Extraversion** | 0-1 | Social-content attention at encoding; a lower feeling-of-knowing threshold, so more partial recalls surface. |
 | **Agreeableness** | 0-1 | Cooperative-content attention at encoding; a faster emotion-regulation reappraisal rate. |
 | **Conscientiousness** | 0-1 | Procedural-content attention at encoding; stronger retrieval-induced forgetting; above 0.6, one working-memory slot fewer. |
-| **Openness** | 0-1 | Novelty attention at encoding; a higher involuntary-recall probability; above 0.6, one working-memory slot more. |
+| **Openness** | 0-1 | Novelty attention at encoding; a higher involuntary-recall probability and a larger schema-encoding boost for novel traces; above 0.6, one working-memory slot more. |
 
 ### Persona Definition Example
 
@@ -641,7 +641,7 @@ Retrieval combines six weighted signals to rank candidate traces ([`RetrievalPri
 
 ### Eight Cognitive Mechanisms
 
-Located in `cognition/memory/mechanisms/`; six of the eight are scaled by a HEXACO trait. They run when `CognitiveMemoryManager` is initialized with a `cognitiveMechanisms` config:
+Located in `cognition/memory/mechanisms/`; seven of the eight are scaled by a HEXACO trait, all but temporal gist extraction. They run when `CognitiveMemoryManager` is initialized with a `cognitiveMechanisms` config:
 
 | Mechanism | HEXACO Modulator | Effect |
 |-----------|-----------------|--------|
@@ -650,7 +650,7 @@ Located in `cognition/memory/mechanisms/`; six of the eight are scaled by a HEXA
 | Involuntary recall | Openness | Spontaneous memory surfacing; high O increases trigger sensitivity |
 | Feeling-of-knowing | Extraversion | Metacognitive confidence judgment; high X lowers sharing threshold |
 | Temporal gist extraction | None | Compresses old, rarely retrieved traces into a gist at consolidation |
-| Schema encoding | None | Strengthens novel traces and weakens schema-congruent ones at encoding, once the host sets cluster centroids |
+| Schema encoding | Openness | Strengthens novel traces and weakens schema-congruent ones at encoding, once the host sets cluster centroids; high O strengthens novel traces more |
 | Source confidence decay | Honesty-Humility | Shortens the stability of inferred and reflected traces at consolidation; high H decays reflections faster |
 | Emotion regulation | Agreeableness | Reappraises high-arousal traces at consolidation; high A reappraises faster |
 
@@ -725,7 +725,7 @@ Seven [`IVectorStore`](https://github.com/framerslab/agentos/blob/master/src/cor
 
 ### Chunking Strategies
 
-[`SemanticChunker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/chunking/SemanticChunker.ts) in `cognition/rag/chunking/` splits text at headings, then paragraphs, then sentences, keeps fenced code blocks whole, and falls back to fixed-size splits for text with no boundaries.
+[`SemanticChunker`](https://github.com/framerslab/agentos/blob/master/src/cognition/rag/chunking/SemanticChunker.ts) in `cognition/rag/chunking/` splits text at headings, then paragraphs, then sentences, keeps a fenced code block whole unless it is longer than `maxSize` (2,000 characters unless set), and falls back to fixed-size splits for text with no boundaries ([Chunking and Snippets](../text/CHUNKING_AND_SNIPPETS.md#semanticchunker)).
 
 ### Reranking
 
@@ -1000,7 +1000,7 @@ The real-time voice conversation pipeline lives in `io/voice-pipeline/` and is o
 IDLE -------> startSession() ---------> LISTENING
 LISTENING --> turn_complete ----------> PROCESSING
 PROCESSING -> LLM tokens start -------> SPEAKING
-SPEAKING ---> TTS flush_complete -----> LISTENING
+SPEAKING ---> TTS flush_complete -----> LISTENING (once played out, on a transport that reports it)
 SPEAKING ---> barge-in (cancel) ------> INTERRUPTING -> LISTENING
 ANY --------> transport disconnect ---> CLOSED
 ANY --------> stopSession() ----------> CLOSED
@@ -1132,7 +1132,7 @@ When `observability.metrics.enabled` is true, AgentOS exports ([`otel.ts`](https
 
 ### Logging
 
-[`PinoLogger`](https://github.com/framerslab/agentos/blob/master/src/core/logging/PinoLogger.ts) injects `trace_id` and `span_id` fields when `observability.logging.includeTraceIds` is true. Optional `exportToOtel` emits `LogRecord` objects via `@opentelemetry/api-logs`.
+[`PinoLogger`](https://github.com/framerslab/agentos/blob/master/src/core/logging/PinoLogger.ts) injects `trace_id` and `span_id` fields when `observability.logging.includeTraceIds` is true. Optional `exportToOtel` emits `LogRecord` objects via `@opentelemetry/api-logs`. With content-safe telemetry on (`enableContentSafeTelemetry` from `@framers/agentos/logging`), it writes no record: the host's sink receives one fixed event per record instead, and spans, metrics and log export stay off.
 
 ### Evaluation Framework
 

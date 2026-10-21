@@ -7,6 +7,10 @@
  * - feat!: or BREAKING CHANGE: → minor (0.1.x → 0.2.0) - not major while 0.x
  * - perf:, refactor: → patch
  * - docs:, chore:, test:, ci: → no release
+ *
+ * Nothing is committed to master: master's branch rules refuse direct pushes.
+ * A release is the tag v<version>, the npm package and the GitHub release;
+ * package.json's version on master is not the released version.
  */
 export default {
   branches: ['master'],
@@ -60,22 +64,13 @@ export default {
       },
       // Writer tweaks: don't silently truncate long commit subjects.
       // The default writer caps `header` at 100 chars and slices mid-word.
+      // Leave `transform` to the preset: a writerOpts property replaces the
+      // preset's, and the preset's transform is what drops merge commits and
+      // the hidden types, gives each section and the breaking-change notes
+      // their titles, and adds each commit's 7-character shortHash.
       writerOpts: {
         headerMaxLength: 500,
-        transform: (commit, context) => {
-          // conventional-changelog-writer@8 freezes commit objects, so
-          // we must return a new object instead of mutating in place.
-          if (commit.hash && typeof commit.hash === 'string') {
-            return { ...commit, shortHash: commit.hash.substring(0, 7) };
-          }
-          return commit;
-        },
       },
-    }],
-
-    // Update CHANGELOG.md
-    ['@semantic-release/changelog', {
-      changelogFile: 'CHANGELOG.md'
     }],
 
     // Publish to npm
@@ -83,17 +78,13 @@ export default {
       npmPublish: true
     }],
 
-    // Commit version bump, changelog, and refreshed test-count badge.
-    ['@semantic-release/git', {
-      assets: ['CHANGELOG.md', 'package.json', '.github/badges/tests.json'],
-      message: 'chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}'
-    }],
-
-    // Create GitHub release
+    // Create the GitHub release, with the refreshed test-count badge attached.
+    // The README's badge reads the copy shipped in the npm package, through unpkg.
     ['@semantic-release/github', {
       successComment: false,
       failComment: false,
-      releasedLabels: false
+      releasedLabels: false,
+      assets: [{ path: '.github/badges/tests.json', name: 'tests.json', label: 'Test count badge' }]
     }]
   ]
 };

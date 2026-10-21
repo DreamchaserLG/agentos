@@ -10,6 +10,7 @@ import {
   shouldExportAgentOSLogsToOtel,
   shouldIncludeTraceIdsInAgentOSLogs,
 } from '../../safety/evaluation/observability/otel.js';
+import { emitContentSafeLog, isContentSafeTelemetryEnabled } from './contentSafeTelemetry.js';
 
 function maybeAttachTraceMeta(meta?: Record<string, any>): Record<string, any> {
   if (!shouldIncludeTraceIdsInAgentOSLogs()) return meta ?? {};
@@ -95,49 +96,85 @@ function maybeEmitOtelLog(
 }
 
 /**
- * An {@link ILogger} over pino, writing JSON lines, with trace ids and an OpenTelemetry mirror
- * when observability turns them on. A logger built without a pino instance takes its level
- * from the environment (`AGENTOS_LOG_LEVEL`, `AGENTOS_DEBUG=1`) unless `options.level` sets one.
+ * An {@link ILogger} on pino: structured JSON records, trace ids in their fields when configured, and an optional
+ * OpenTelemetry copy of each record. A logger built without a pino instance takes its level from the environment
+ * (`AGENTOS_LOG_LEVEL`, `AGENTOS_DEBUG=1`) unless `options.level` sets one. While content-safe telemetry is on
+ * (`enableContentSafeTelemetry`), each record, `fatal` lines and events included, becomes one fixed event for the
+ * host's sink instead and nothing of it is read, and `child` returns the same logger.
  */
 export class PinoLogger implements ILogger {
   private readonly base: Logger;
 
+  /**
+   * @param options - pino options for a new logger; ignored when `existing` is given.
+   * @param existing - A pino logger to wrap instead of creating one.
+   */
   constructor(options?: LoggerOptions, existing?: Logger) {
     this.base = existing ?? pino({ level: parseLogLevel(process.env).level, ...options });
   }
 
+  /**
+   * Writes an info record, or passes one fixed event to the content-safe sink while that mode is on.
+   *
+   * @param message - The record's message.
+   * @param meta - Fields of the record.
+   */
   info(message: string, meta?: Record<string, any>): void {
+    if (emitContentSafeLog('info')) return;
     const metaWithTrace = maybeAttachTraceMeta(meta);
     this.base.info(metaWithTrace, message);
     maybeEmitOtelLog('info', message, metaWithTrace, this.base.bindings());
   }
 
+  /**
+   * Writes a warn record, or passes one fixed event to the content-safe sink while that mode is on.
+   *
+   * @param message - The record's message.
+   * @param meta - Fields of the record.
+   */
   warn(message: string, meta?: Record<string, any>): void {
+    if (emitContentSafeLog('warn')) return;
     const metaWithTrace = maybeAttachTraceMeta(meta);
     this.base.warn(metaWithTrace, message);
     maybeEmitOtelLog('warn', message, metaWithTrace, this.base.bindings());
   }
 
+  /**
+   * Writes an error record, or passes one fixed event to the content-safe sink while that mode is on.
+   *
+   * @param message - The record's message.
+   * @param meta - Fields of the record; an `err` or `error` field holding an Error also fills the OpenTelemetry
+   *   record's exception attributes.
+   */
   error(message: string, meta?: Record<string, any>): void {
+    if (emitContentSafeLog('error')) return;
     const metaWithTrace = maybeAttachTraceMeta(meta);
     this.base.error(metaWithTrace, message);
     maybeEmitOtelLog('error', message, metaWithTrace, this.base.bindings());
   }
 
+  /**
+   * Writes a debug record, or passes one fixed event to the content-safe sink while that mode is on.
+   *
+   * @param message - The record's message.
+   * @param meta - Fields of the record.
+   */
   debug(message: string, meta?: Record<string, any>): void {
+    if (emitContentSafeLog('debug')) return;
     const metaWithTrace = maybeAttachTraceMeta(meta);
     this.base.debug(metaWithTrace, message);
     maybeEmitOtelLog('debug', message, metaWithTrace, this.base.bindings());
   }
 
   /**
-   * Writes the process's last line. pino flushes its destination synchronously at `fatal`
-   * when the destination supports it.
+   * Writes the process's last line, or passes one fixed event at `error` to the content-safe sink while that mode is
+   * on. pino flushes its destination synchronously at `fatal` when the destination supports it.
    *
    * @param message - The line's message.
    * @param meta - Fields for the line.
    */
   fatal(message: string, meta?: Record<string, any>): void {
+    if (emitContentSafeLog('error')) return;
     const metaWithTrace = maybeAttachTraceMeta(meta);
     this.base.fatal(metaWithTrace, message);
     maybeEmitOtelLog('fatal', message, metaWithTrace, this.base.bindings());
@@ -146,19 +183,29 @@ export class PinoLogger implements ILogger {
   /**
    * Writes one event object first, with no message: `{ ...fields, event }`, plus trace ids
    * when they are on. The OpenTelemetry mirror, when it is on, takes the event's name as the
-   * record's body.
+   * record's body. While content-safe telemetry is on, it passes one fixed event to the sink
+   * instead (a `fatal` line at `error`) and reads nothing of the event.
    *
    * @param level - The line's level.
    * @param event - The event's name.
    * @param fields - The event's fields and context.
    */
   writeEvent(level: Level, event: string, fields: Record<string, unknown>): void {
+    if (emitContentSafeLog(level === 'fatal' ? 'error' : level)) return;
     const meta = maybeAttachTraceMeta({ ...fields, event });
     this.base[level](meta);
     maybeEmitOtelLog(level, event, meta, this.base.bindings());
   }
 
+  /**
+   * A logger whose records also carry `bindings`. While content-safe telemetry is on, this returns the same logger
+   * and does not read `bindings`.
+   *
+   * @param bindings - Fields every record of the child carries.
+   * @returns The child logger.
+   */
   child(bindings: Record<string, any>): ILogger {
+    if (isContentSafeTelemetryEnabled()) return this;
     return new PinoLogger(undefined, this.base.child(bindings));
   }
 }

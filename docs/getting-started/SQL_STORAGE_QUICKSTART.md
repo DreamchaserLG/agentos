@@ -22,7 +22,7 @@ keywords:
 
 This page covers two layers:
 
-1. **Storage adapter**: [`@framers/sql-storage-adapter`](https://github.com/framerslab/sql-storage-adapter) and its [`StorageAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/index.ts) interface. AgentOS's SQL-backed stores run on it: the memory facade's `Brain`, `SqlVectorStore`, `SqlStorageMemoryArchive`, `ConversationManager` persistence, `SqlTaskOutcomeTelemetryStore` and `SqlSpendMeter`.
+1. **Storage adapter**: [`@framers/sql-storage-adapter`](https://github.com/framerslab/sql-storage-adapter) and its [`StorageAdapter`](https://github.com/framerslab/sql-storage-adapter/blob/master/src/core/contracts/index.ts) interface. AgentOS's SQL-backed stores run on it: the memory facade's `Brain`, `SqlVectorStore`, `SqlStorageMemoryArchive`, `ConversationManager` persistence, `SqlTaskOutcomeTelemetryStore` and `SqlSpendMeter`; `PostgresVectorStore` does too when it is given a PostgreSQL adapter.
 2. **Scaling path**: a memory brain starts as one SQLite file, with an HNSW index file beside it, and moves to Postgres or Qdrant through `MigrationEngine.migrate()`.
 
 ---
@@ -161,11 +161,11 @@ const mem = await Memory.createSqlite('./brain.sqlite', {
 });
 ```
 
-A brain is one `brain.sqlite` file. With the optional `hnswlib-node` package installed, the facade keeps an HNSW index beside it as `brain.hnsw`, loads it at start, and builds it when `remember()` stores a trace with an embedding and the brain then holds at least 1,000 traces (deleted traces excluded, with or without embeddings); the build indexes every trace that has an embedding. Without the package, recall runs without the index.
+A brain is one `brain.sqlite` file. With the optional `hnswlib-node` package installed, the facade keeps an HNSW index beside it, one file per brain, named `<database file name>.<digest>.hnsw` (the digest is of the file name and the brain id, so brains sharing a file or a directory never share an index). It loads the index at start, and builds it when `remember()` stores a trace with an embedding and the brain then holds at least 1,000 traces of its own (deleted traces excluded, with or without embeddings), or after an import; the build indexes each of the brain's traces that has an embedding. A `brain.hnsw` file, the one index of every brain in a directory that earlier versions wrote, is not read. Without the package, recall runs without the index.
 
 ### Postgres
 
-`Memory.createPostgres(connectionString, { brainId })` opens a brain in Postgres. For the vector-store layer, `PostgresVectorStore` (from `@framers/agentos/cognition/rag`) uses pgvector; see [Postgres Backend](../memory/POSTGRES_BACKEND.md).
+`Memory.createPostgres(connectionString, { brainId })` opens a brain in Postgres. For the vector-store layer, `PostgresVectorStore` (from `@framers/agentos/cognition/rag`) uses pgvector, on its own pool, a pool of yours or an open PostgreSQL adapter, whose transactions it can join; see [Postgres Backend](../memory/POSTGRES_BACKEND.md#an-adapter-you-own-and-its-transactions).
 
 ### Qdrant and Pinecone
 

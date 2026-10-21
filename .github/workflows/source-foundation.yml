@@ -1,0 +1,142 @@
+name: Published source foundation
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# A newer push to a pull request cancels the run of the commit it replaces. Every
+# other run keys a group of its own, its run id, so it never waits behind another run
+# and nothing cancels it: a push to master and a manual run. A re-run keys its own
+# group too, so re-running an older commit's run never cancels the newest one.
+concurrency:
+  group: source-foundation-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
+
+permissions:
+  contents: read
+
+jobs:
+  consumer:
+    name: Installed source foundation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: ci_test_password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      AGENTOS_TEST_POSTGRES_URL: postgresql://postgres:ci_test_password@localhost:5432/postgres
+      SELECTED_CORE_VERSION: ${{ vars.SOURCE_FOUNDATION_CORE_VERSION }}
+      SELECTED_AS_VERSION: ${{ vars.SOURCE_FOUNDATION_AS_VERSION }}
+      SELECTED_ADAPTER_VERSION: ${{ vars.SOURCE_FOUNDATION_ADAPTER_VERSION }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Select immutable versions and isolate the consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mode=$(cat contracts/source-foundation/mode.txt)
+          # The released versions are checked in beside the contracts. The repository's variables read empty
+          # on a pull request from a fork (run 39415287907, pull request 529), so such a run checks the file's
+          # versions; a variable that is set and differs from the file fails the run, so a fork's change to
+          # the contracts is checked against the same versions as the push to master.
+          released=contracts/source-foundation/released-versions.txt
+          pinned() { awk -v name="$1" '$1 == name { print $2 }' "$released"; }
+          file_core=$(pinned @framers/agentos)
+          file_as=$(pinned @framers/agentos-ext-account-sources)
+          file_adapter=$(pinned @framers/sql-storage-adapter)
+          agrees() {
+            [[ -z "$2" || "$2" == "$3" ]] && return 0
+            echo "::error::The variable $1 ($2) differs from $released ($3). Change both together."
+            return 1
+          }
+          agrees SOURCE_FOUNDATION_CORE_VERSION "$SELECTED_CORE_VERSION" "$file_core"
+          agrees SOURCE_FOUNDATION_AS_VERSION "$SELECTED_AS_VERSION" "$file_as"
+          agrees SOURCE_FOUNDATION_ADAPTER_VERSION "$SELECTED_ADAPTER_VERSION" "$file_adapter"
+          case "$mode" in
+            baseline) core_version=0.13.49; as_version=0.1.0 ;;
+            released) core_version="$file_core"; as_version="$file_as" ;;
+            *) exit 1 ;;
+          esac
+          adapter_version="$file_adapter"
+          for value in "$core_version" "$as_version" "$adapter_version"; do
+            [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          done
+          consumer_dir=$(mktemp -d "$RUNNER_TEMP/source-foundation.XXXXXX")
+          cp contracts/source-foundation/*.ts "$consumer_dir/"
+          # No overrides: an overridden edge is checked against the override, not the range its package published.
+          # Without them a peer range that misses a selected version stops the install or fails npm ls, and a
+          # dependency range that misses one installs a second copy, which provenance.ts rejects.
+          cat > "$consumer_dir/package.json" <<JSON
+          {
+            "name": "source-foundation-consumer", "private": true, "type": "module",
+            "dependencies": {
+              "@framers/agentos": "$core_version",
+              "@framers/agentos-ext-account-sources": "$as_version",
+              "@framers/sql-storage-adapter": "$adapter_version"
+            },
+            "devDependencies": { "typescript": "5.4.5", "@types/node": "22.20.1" }
+          }
+          JSON
+          {
+            echo "CONSUMER_DIR=$consumer_dir"
+            echo "CORE_VERSION=$core_version"
+            echo "AS_VERSION=$as_version"
+            echo "ADAPTER_VERSION=$adapter_version"
+          } >> "$GITHUB_ENV"
+      - name: Install registry packages and freeze the dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$CONSUMER_DIR"
+          npm install --package-lock-only --ignore-scripts --omit=optional --no-audit --no-fund
+          npm ci --ignore-scripts --omit=optional --no-audit --no-fund
+          npm ls @framers/agentos @framers/agentos-ext-account-sources @framers/sql-storage-adapter --all --json > dependency-tree.json
+      - name: Compile the installed consumer contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$CONSUMER_DIR"
+          # Node's own resolution, the strictest a consumer compiles under: each import the contracts name resolves
+          # through the package's export map as Node resolves it. --skipLibCheck leaves the packages' internal
+          # declaration errors to their own builds.
+          node node_modules/typescript/bin/tsc --strict --module NodeNext --moduleResolution NodeNext --target ES2022 --lib ES2022,DOM --types node --skipLibCheck --outDir out ./*.ts
+      - name: Record registry integrity and reject workspace resolution
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$CONSUMER_DIR"
+          node out/provenance.js
+      - name: Exercise the installed packages on PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$CONSUMER_DIR"
+          [[ -f out/core.js || -f out/account-sources.js ]]
+          if [[ -f out/core.js ]]; then node --test out/core.js; else node --test out/account-sources.js; fi
+      - name: Preserve package provenance
+        if: always() && env.CONSUMER_DIR != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-foundation-evidence
+          if-no-files-found: error
+          path: |
+            ${{ env.CONSUMER_DIR }}/package.json
+            ${{ env.CONSUMER_DIR }}/package-lock.json
+            ${{ env.CONSUMER_DIR }}/dependency-tree.json
+            ${{ env.CONSUMER_DIR }}/registry-evidence.json

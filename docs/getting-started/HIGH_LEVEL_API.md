@@ -142,6 +142,14 @@ Prompt-only `ToolDefinitionForLLM[]` are exposed to the model too, but if the
 model calls one without an executor attached, AgentOS returns an explicit tool
 error instead of silently no-oping.
 
+In the native tool loop of either call, the model's next step receives a tool's
+output as JSON. A tool that succeeds with no output, or with one JSON leaves out
+(a function, a symbol, a `toJSON` that returns nothing), is sent as the empty
+string's JSON (`""`) and recorded as a success. A tool whose output cannot be
+written as JSON (a getter or a `toJSON` that throws, a cycle) fails with the
+error the write threw, in the native loops and the prompt-tool loop alike, and
+an agency seat's mask does not change that.
+
 The same `tools` forms work on `agent({ tools })` and `agency({ tools })`.
 When an agency-level tool set is combined with per-agent tools, AgentOS
 normalizes both sides first and then merges by tool name, with the per-agent
@@ -225,6 +233,29 @@ const pending = session.send('Draft a reply to the last message.', { abortSignal
 turn.abort(); // the conversation moved on
 await pending.catch((error) => console.log(error.name)); // 'AbortError'
 ```
+
+## Attempts
+
+```ts
+import { generateText, type AttemptOutcome } from '@framers/agentos';
+
+const outcomes: AttemptOutcome[] = [];
+const { text } = await generateText({
+  provider: 'openai',
+  prompt: 'Name the largest moon of Saturn.',
+  // One request: a 429, a 5xx, a timeout or a network failure throws, with no retry.
+  maxAttempts: 1,
+  onAttempt: (outcome) => outcomes.push(outcome),
+});
+console.log(text, outcomes); // ... [{ attempt: 1, status: 200, ok: true }]
+```
+
+`generateText()`, `streamText()`, `generateObject()`, `streamObject()` and `embedText()` take `maxAttempts` and `onAttempt`, which reach the provider as `ModelCompletionOptions`:
+
+- `maxAttempts` is the most requests one call sends, a first and its retries together; the provider's configured count (`maxRetries`, 3 for OpenAI) holds when it is left out. A count that is not a whole number of 1 or more is refused with a `RangeError`. The OpenAI provider counts each call's attempts with `CountingAttemptBudget`, the attempt authorizer the voice platform calls before each of its requests ([Compound credit](../safety/SAFETY_PRIMITIVES.md#compound-credit)), so an attempt past the count is refused before it is sent. The other providers keep their configured retries and report nothing.
+- `onAttempt` is called once for each request the call sent, with an `AttemptOutcome`: `attempt`, the request's number in the call from 1; `status`, the HTTP status it answered, or `null` when none came (a timeout, a network failure, or the caller's abort once the request had begun); and `ok`. A request refused before it is sent is not reported, and a callback that throws never ends the call. A `generateObject()` validation retry is a call of its own, so its attempts count from 1 again; `embedText()` sends each batch once and reports it as attempt 1.
+
+A caller settles against the report: a request whose usage never arrived (a timeout, an error after it was sent, a cut stream) is one the caller knows was sent.
 
 ## `agency().stream()`
 

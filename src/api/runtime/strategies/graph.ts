@@ -13,9 +13,10 @@
  *
  * Each agent is gated by {@link checkBeforeAgentInput} over the input it
  * receives, its dependencies' outputs included, and is sent the input the
- * check read. An agent the handler rejects, or whose input the post-approval
- * check blocks, does not run, and `[skipped by HITL]` stands as its output
- * for the agents that depend on it.
+ * check read. The post-approval check also reads the task and each
+ * dependency's output on its own. An agent the handler rejects, or whose
+ * input the post-approval check blocks, does not run, and `[skipped by HITL]`
+ * stands as its output for the agents that depend on it.
  *
  * @example
  * ```ts
@@ -39,6 +40,7 @@ import type {
   AgentCallRecord,
   AgencyStreamPart,
 } from '../types.js';
+import type { FallbackSignal } from '../generateText.js';
 import { createBufferedAsyncReplay } from '../streamBuffer.js';
 import { AgencyConfigError } from '../types.js';
 import {
@@ -47,6 +49,10 @@ import {
   checkBeforeAgentInput,
   accumulateExtraUsage,
   buildAgentCallUsage,
+  callRecordExtras,
+  seatMetadataOf,
+  nestedRunUnanswered,
+  nestedStreamUnanswered,
 } from './shared.js';
 
 type StrategyTotalUsage = {
@@ -87,7 +93,7 @@ function topoSort(
   const deps = new Map<string, Set<string>>();
   for (const name of names) {
     const config = agents[name];
-    const dependsOn = (!isAgent(config) && (config as BaseAgentConfig).dependsOn) || [];
+    const dependsOn = seatMetadataOf(config).dependsOn ?? [];
     for (const dep of dependsOn) {
       if (!nameSet.has(dep)) {
         throw new AgencyConfigError(
@@ -156,8 +162,7 @@ export function compileGraph(
             const agentOrConfig = agents[name];
 
             // Build context from dependsOn predecessors.
-            const config = agentOrConfig as BaseAgentConfig;
-            const depNames = (!isAgent(agentOrConfig) && config.dependsOn) || [];
+            const depNames = seatMetadataOf(agentOrConfig).dependsOn ?? [];
             let context = prompt;
             if (depNames.length > 0) {
               const depOutputs = depNames
@@ -167,9 +172,14 @@ export function compileGraph(
             }
 
             /* HITL: check the beforeAgent gate over the input this agent
-               receives, its dependencies' outputs included. The agent is sent
-               the input the check read, the approver's instructions with it. */
-            const gate = await checkBeforeAgentInput(name, context, agentCalls, agencyConfig);
+               receives, its dependencies' outputs included, and over the task
+               and each of those outputs on its own, since the input puts more
+               text after them. The agent is sent the input the check read,
+               the approver's instructions with it. */
+            const gate = await checkBeforeAgentInput(name, context, agentCalls, agencyConfig, [
+              prompt,
+              ...depNames.map((d) => outputs.get(d) ?? ''),
+            ]);
             if (gate.decision && !gate.decision.approved) {
               outputs.set(name, '[skipped by HITL]');
               return null;
@@ -182,6 +192,13 @@ export function compileGraph(
             const start = Date.now();
             const result = (await a.generate(gate.input, opts)) as Record<string, unknown>;
             const durationMs = Date.now() - start;
+            // A nested agency that no seat of its own answered gave no answer,
+            // as a rejected agent gives none: its dependents read the same
+            // marker, and it adds no record.
+            if (nestedRunUnanswered(result)) {
+              outputs.set(name, '[skipped by HITL]');
+              return null;
+            }
 
             const resultText = (result.text as string) ?? '';
             const resultUsage = (result.usage as ResultUsageSnapshot) ?? {};
@@ -196,6 +213,7 @@ export function compileGraph(
               toolCalls: resultToolCalls,
               usage: buildAgentCallUsage(resultUsage),
               durationMs,
+              ...callRecordExtras(result),
             });
 
             totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
@@ -232,7 +250,7 @@ export function compileGraph(
           for (const name of tier) {
             const agentOrConfig = agents[name];
             const config = agentOrConfig as BaseAgentConfig;
-            const depNames = (!isAgent(agentOrConfig) && config.dependsOn) || [];
+            const depNames = seatMetadataOf(agentOrConfig).dependsOn ?? [];
 
             let context = prompt;
             if (depNames.length > 0) {
@@ -243,8 +261,12 @@ export function compileGraph(
             }
 
             // HITL: the beforeAgent gate reads the input this agent receives,
-            // as under execute(), and the agent is sent the input it read.
-            const gate = await checkBeforeAgentInput(name, context, agentCalls, agencyConfig);
+            // and the task and each dependency's output on its own, as under
+            // execute(), and the agent is sent the input it read.
+            const gate = await checkBeforeAgentInput(name, context, agentCalls, agencyConfig, [
+              prompt,
+              ...depNames.map((d) => outputs.get(d) ?? ''),
+            ]);
             if (gate.decision && !gate.decision.approved) {
               outputs.set(name, '[skipped by HITL]');
               continue;
@@ -260,13 +282,21 @@ export function compileGraph(
             let agentText = '';
             let resultUsage: ResultUsageSnapshot = {};
             let resultToolCalls: Array<{ name: string; args: unknown; result?: unknown; error?: string }> = [];
+            let recordExtras: ReturnType<typeof callRecordExtras>;
             const agentStart = Date.now();
             const agentStream = a.stream(agentInput, opts) as {
               textStream?: AsyncIterable<string>;
               text?: Promise<string>;
               usage?: Promise<ResultUsageSnapshot>;
               toolCalls?: Promise<Array<{ name: string; args: unknown; result?: unknown; error?: string }>>;
+              provider?: Promise<string>;
+              model?: Promise<string>;
+              finishReason?: Promise<string>;
+              fallback?: Promise<FallbackSignal | undefined>;
+              agentCalls?: Promise<unknown>;
             } | null;
+            // A nested agency that no seat of its own answered, as under execute().
+            let unanswered = false;
 
             if (agentStream?.textStream) {
               for await (const chunk of agentStream.textStream) {
@@ -281,6 +311,20 @@ export function compileGraph(
               }
               resultUsage = (await Promise.resolve(agentStream.usage)) ?? {};
               resultToolCalls = (await Promise.resolve(agentStream.toolCalls)) ?? [];
+              // Who answered: the leg that served when the seat's chain fired.
+              const [streamProvider, streamModel, streamFinish, streamFallback] = await Promise.all([
+                Promise.resolve(agentStream.provider),
+                Promise.resolve(agentStream.model),
+                Promise.resolve(agentStream.finishReason),
+                Promise.resolve(agentStream.fallback),
+              ]);
+              recordExtras = callRecordExtras({
+                provider: streamFallback?.finalProvider ?? streamProvider,
+                model: streamFallback?.finalModel ?? streamModel,
+                finishReason: streamFinish,
+                fallback: streamFallback,
+              });
+              unanswered = await nestedStreamUnanswered(agentStream, agentText, resultUsage, streamFinish);
             } else {
               const result = (await a.generate(agentInput, opts)) as Record<string, unknown>;
               agentText = (result.text as string) ?? '';
@@ -289,22 +333,27 @@ export function compileGraph(
               }
               resultUsage = (result.usage as ResultUsageSnapshot) ?? {};
               resultToolCalls = (result.toolCalls as Array<{ name: string; args: unknown; result?: unknown; error?: string }>) ?? [];
+              recordExtras = callRecordExtras(result);
+              unanswered = nestedRunUnanswered(result);
             }
 
-            outputs.set(name, agentText);
-            agentCalls.push({
-              agent: name,
-              input: context,
-              output: agentText,
-              toolCalls: resultToolCalls,
-              usage: buildAgentCallUsage(resultUsage),
-              durationMs: Date.now() - agentStart,
-            });
+            outputs.set(name, unanswered ? '[skipped by HITL]' : agentText);
+            if (!unanswered) {
+              agentCalls.push({
+                agent: name,
+                input: context,
+                output: agentText,
+                toolCalls: resultToolCalls,
+                usage: buildAgentCallUsage(resultUsage),
+                durationMs: Date.now() - agentStart,
+                ...recordExtras,
+              });
 
-            totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
-            totalUsage.completionTokens += resultUsage.completionTokens ?? 0;
-            totalUsage.totalTokens += resultUsage.totalTokens ?? 0;
-            accumulateExtraUsage(totalUsage, resultUsage);
+              totalUsage.promptTokens += resultUsage.promptTokens ?? 0;
+              totalUsage.completionTokens += resultUsage.completionTokens ?? 0;
+              totalUsage.totalTokens += resultUsage.totalTokens ?? 0;
+              accumulateExtraUsage(totalUsage, resultUsage);
+            }
 
             yield {
               type: 'agent-end' as const,

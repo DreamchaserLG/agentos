@@ -15,12 +15,20 @@ import { z, type ZodType, type ZodError } from 'zod';
 
 import { generateText } from './generateText.js';
 import type { Message, SystemContentBlock, TokenUsage } from './generateText.js';
+import type { AttemptOutcome } from '../core/llm/providers/IProvider.js';
 import { resolveModelOption } from './model.js';
 import { lowerZodToJsonSchema } from '../orchestration/compiler/SchemaLowering.js';
 import { estimateMaxTokensForZodSchema } from './runtime/schemaTokenEstimate.js';
 import { buildResponseFormatForProvider } from './runtime/responseFormatForProvider.js';
 import { buildResponseFormat } from '../core/llm/providers/structuredOutputFormat.js';
-import { buildSchemaInstructionText, extractJson, repairStringEncodedContainers, summarizeBadResponse, summarizeZodErrors } from './runtime/structuredReply.js';
+import {
+  buildSchemaInstructionText,
+  extractJson,
+  repairEnumCasing,
+  repairStringEncodedContainers,
+  summarizeBadResponse,
+  summarizeZodErrors,
+} from './runtime/structuredReply.js';
 import { asSpendBudget, type SpendBudget, type SpendBudgetOptions } from './runtime/spendBudget.js';
 
 /**
@@ -195,7 +203,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
   /**
    * Ordered fallback providers tried when the primary fails with a retryable
    * error. When undefined, auto-built from env keys. Pass `[]` to disable.
-   * @see {@link import('./generateText.js').GenerateTextOptions.fallbackProviders}
+   * @see {@link GenerateTextOptions.fallbackProviders}
    */
   fallbackProviders?: import('./generateText.js').FallbackProviderEntry[];
 
@@ -206,7 +214,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
 
   /**
    * Caller's intended content policy tier. Forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.policyTier}
+   * {@link GenerateTextOptions.policyTier}
    * so structured-output callers get the same policy-aware fallback
    * behavior as plain text callers — mature/private-adult requests
    * auto-route refusals to an uncensored OpenRouter model instead of
@@ -223,7 +231,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
   policyTier?: 'safe' | 'standard' | 'mature' | 'private-adult';
   /**
    * Per-call request timeout in milliseconds, forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.requestTimeout}.
+   * {@link GenerateTextOptions.requestTimeout}.
    * Structured-output callers that emit long strings (e.g. codegen TSX) raise
    * the abort window for this call without slowing the provider's default
    * failover for chat / narration traffic.
@@ -231,15 +239,29 @@ export interface GenerateObjectOptions<T extends ZodType> {
   requestTimeout?: number;
 
   /**
+   * The most attempts each generation's call makes, a first and its retries together; the provider's configured
+   * count when left out. A validation retry (`maxRetries`) is a generation of its own, with its own count. Within one
+   * attempt, a key-scoped failure on a pool of several keys re-sends the same request with the next usable key, at
+   * most once per key, and those sends are not counted.
+   */
+  maxAttempts?: number;
+
+  /**
+   * Called once per attempt a generation's call made, with the answer of the attempt's last send (a key hop's
+   * earlier answers are not reported), so a caller can settle the attempts it paid for.
+   */
+  onAttempt?: (outcome: AttemptOutcome) => void;
+
+  /**
    * Ends the call when it aborts: no further attempt or fallback hop starts, and the call rejects with the signal's
-   * reason. Forwarded to every attempt's {@link import('./generateText.js').GenerateTextOptions.abortSignal}, which
+   * reason. Forwarded to every attempt's {@link GenerateTextOptions.abortSignal}, which
    * hands it to the provider request.
    */
   abortSignal?: AbortSignal;
 
   /**
    * Reasoning-depth / token-spend control, forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.effort}. On
+   * {@link GenerateTextOptions.effort}. On
    * effort-capable models the provider emits it as `output_config.effort`
    * (Anthropic) or `reasoning_effort` (OpenAI o-series / GPT-5). Dropped on
    * models that don't support it.
@@ -248,7 +270,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
 
   /**
    * Extended-thinking switch, forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.thinking}.
+   * {@link GenerateTextOptions.thinking}.
    * `false` turns thinking off with the model's own off shape (Sonnet 5.5
    * takes `between_tools`, at effort `high` or below); Opus 5.5, Fable and
    * Mythos always think. Omitted keeps the model's default, which is thinking
@@ -260,7 +282,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
 
   /**
    * Per-call prompt-cache control, forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.cache}.
+   * {@link GenerateTextOptions.cache}.
    * `false` opts this call out of ALL cache marking (the schema block's
    * marker included — right for one-shot extractions); `{ ttl: '1h' }` puts
    * a 1-hour TTL on the provider's auto markers (the moving message-tail).
@@ -279,7 +301,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
 
   /**
    * Per-conversation affinity key, forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.sessionId}.
+   * {@link GenerateTextOptions.sessionId}.
    * OpenRouter emits it as `session_id` for provider sticky routing —
    * upstream prompt caches are host-scoped, so a load-balanced multi-call
    * pipeline otherwise cold-misses the cache a prior call wrote on a
@@ -291,7 +313,7 @@ export interface GenerateObjectOptions<T extends ZodType> {
 
   /**
    * Opt-in source label forwarded to
-   * {@link import('./generateText.js').GenerateTextOptions.source} and
+   * {@link GenerateTextOptions.source} and
    * surfaced on the global LLM usage observer event. Hosts tag their
    * cost/telemetry rows with it (e.g. 'codegen_tool',
    * 'narrator_state_extractor') — without it every structured-output
@@ -534,8 +556,8 @@ export async function generateObject<T extends ZodType>(
   // built by the same shared function the fallback legs use, so the
   // (provider, model, schema) -> payload logic lives exactly once. See
   // runtime/responseFormatForProvider.ts for the per-provider behavior
-  // (OpenAI strict json_schema gate, Anthropic forced tool + Fable
-  // prompt-only degrade, Gemini responseSchema, OpenRouter strict gate,
+  // (OpenAI strict json_schema gate; Anthropic's JSON output format, forced
+  // tool or prompt-only route; Gemini responseSchema, OpenRouter strict gate,
   // json_object fallbacks).
   const { providerId, modelId } = resolveModelOption(opts, 'text');
   let responseFormat = buildResponseFormatForProvider({
@@ -634,6 +656,9 @@ export async function generateObject<T extends ZodType>(
       // large-output structured-output callers (codegen TSX) get a longer
       // abort window than the provider default.
       requestTimeout: opts.requestTimeout,
+      // The call's attempt count and its report go with the timeout.
+      maxAttempts: opts.maxAttempts,
+      onAttempt: opts.onAttempt,
       // The caller's signal reaches this attempt's provider request.
       abortSignal: opts.abortSignal,
       // Forward reasoning effort so reasoning-capable models (gpt-5.x ->
@@ -750,6 +775,23 @@ export async function generateObject<T extends ZodType>(
         // thing and the failure log masked the actual cause.
         parsed = repair.value;
         validation = revalidation;
+      }
+    }
+
+    if (!validation.success) {
+      // Anthropic's JSON output format does not guarantee the capitalization
+      // of enum and const values. When the only defects are enum or literal
+      // values that differ from the schema's by case, repair them to the
+      // schema's spelling and re-validate once before a retry is spent.
+      const casing = repairEnumCasing(parsed, validation.error);
+      if (casing.repaired) {
+        // Adopt the repaired candidate and its revalidation even when that still
+        // fails, as the container repair above does: with the casing right, the
+        // issues left (a refinement, a bound, a missing field) are the ones the
+        // retry's feedback and the terminal error should name, not the casing
+        // the model would be asked to fix again.
+        parsed = casing.value;
+        validation = effectiveSchema.safeParse(casing.value) as typeof validation;
       }
     }
 

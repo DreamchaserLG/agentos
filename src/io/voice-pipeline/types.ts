@@ -32,7 +32,7 @@
  * is handled at the transport level rather than per-callback.
  */
 
-import type { EventEmitter } from 'node:events';
+import type { EventEmitterLike, VoiceEventListener } from './VoiceEventEmitter.js';
 
 // ============================================================================
 // Section 1 -- Raw audio types
@@ -91,6 +91,15 @@ export interface AudioFrame {
    * See `DiarizedSegment.speakerId` for the post-diarization label.
    */
   speakerHint?: string;
+
+  /** Validated wire packet sequence when supplied by the capture boundary. */
+  sequence?: number;
+
+  /** Channel count at the capture boundary; omitted means the legacy mono convention. */
+  channels?: number;
+
+  /** Optional call fence; required by {@link ScopedAudioFrame}. */
+  generation?: VoiceGeneration;
 }
 
 /**
@@ -145,6 +154,21 @@ export interface EncodedAudioChunk {
    * accurately when playback is cut short.
    */
   text: string;
+
+  /** Container of the declared codec; omitted preserves legacy metadata. */
+  container?: 'raw' | 'wav' | 'mp3' | 'ogg';
+
+  /** Captured tenant scope; required on call-profile output. */
+  scopeId?: string;
+
+  /** Captured call; required on call-profile output. */
+  callId?: string;
+
+  /** Call fence captured when this synthesis request started. */
+  generation?: VoiceGeneration;
+
+  /** Monotonic playback chunk sequence within the inference generation. */
+  sequence?: number;
 }
 
 // ============================================================================
@@ -206,7 +230,7 @@ export type TransportControlMessage =
  *
  * @see {@link WebSocketStreamTransport} for the canonical WebSocket implementation.
  */
-export interface IStreamTransport extends EventEmitter {
+export interface IStreamTransport extends EventEmitterLike {
   /**
    * Stable identifier for this transport connection (e.g. a UUID or socket ID).
    * Used as a correlation key in logs and metrics.
@@ -221,6 +245,13 @@ export interface IStreamTransport extends EventEmitter {
    * - `'closed'` -- no longer usable.
    */
   readonly state: 'connecting' | 'open' | 'closing' | 'closed';
+
+  /**
+   * The one audio format the transport plays, when it plays only one: `LiveKitStreamTransport` with a publisher
+   * plays `'pcm'`. `VoicePipelineOrchestrator` asks its TTS for this format, and reports a chunk in another one instead
+   * of sending it. Absent when the remote client decodes what it receives.
+   */
+  readonly playbackFormat?: 'pcm' | 'mp3' | 'opus';
 
   /**
    * Send a synthesised audio chunk to the remote client for playback.
@@ -242,6 +273,22 @@ export interface IStreamTransport extends EventEmitter {
   sendControl(message: ServerTextMessage): Promise<void>;
 
   /**
+   * Resolves once the audio handed to `sendAudio()` has played out at the far end, as far as the transport can tell,
+   * on a transport that plays it on its own timing after taking it, as a speaking `LiveKitStreamTransport` does: every
+   * chunk sent so far, and any sent while it waits. Audio a clear discarded counts as played out.
+   * `VoicePipelineOrchestrator` without a call profile keeps a reply `speaking` until it settles, so speech over the
+   * rest of the reply interrupts it; a rejection ends the reply too, as interrupted, since what of it played is not
+   * known (`VoiceConversationItem`), unless the wait was aborted. It aborts `signal` when a barge-in
+   * cuts the reply or the session closes first, and a transport may then settle the wait at once. On a transport
+   * without it, the orchestrator keeps the reply `speaking` for the duration of the audio it was sent instead
+   * (`VoicePipelineConfig.maxPlayoutWaitMs`).
+   *
+   * @param signal - Aborted when the wait is no longer needed.
+   * @returns Resolves once the audio sent so far has played out.
+   */
+  waitForPlayout?(signal?: AbortSignal): Promise<void>;
+
+  /**
    * Close the transport, optionally supplying a WebSocket-style close code and
    * human-readable reason string for diagnostics.
    *
@@ -254,6 +301,75 @@ export interface IStreamTransport extends EventEmitter {
 // ============================================================================
 // Section 3 -- Streaming STT (Speech-to-Text)
 // ============================================================================
+
+/**
+ * A hosted socket's immutable identity, established before any network
+ * opening. The built-in Deepgram and OpenAI streaming adapters give one to
+ * every socket they try, retries, reconnects and rollovers included, and pass
+ * it to {@link SttConnectionHooks.authorize} before the WebSocket upgrade.
+ */
+export interface SttConnectionOpening {
+  /** UUID unique across providers, retries, rollovers and process restarts. */
+  readonly connectionId: string;
+  /** Adapter id, such as `deepgram-streaming`. */
+  readonly providerId: string;
+  /** Exact hosted `vendor:model` entry used to reserve and price this socket. */
+  readonly entry: string;
+  /** Exact model used on the wire. */
+  readonly model: string;
+}
+
+/**
+ * Built-in hosted usage, with the identity shared by authorization and
+ * settlement: one immutable cumulative report per interval and exactly one
+ * final report for every socket a built-in adapter tried.
+ */
+export interface SttMeasuredUsageEvent extends StreamingSTTUsageEvent {
+  /** The socket's {@link SttConnectionOpening.connectionId}. */
+  readonly connectionId: string;
+  /** The socket's {@link SttConnectionOpening.entry}. */
+  readonly entry: string;
+  /** The socket's {@link SttConnectionOpening.model}. */
+  readonly model: string;
+  /** The supplier's request id for this socket, when the supplier reported one. */
+  readonly supplierRequestId?: string;
+}
+
+/**
+ * Host accounting at the socket boundary, separate from provider permission
+ * (`ProviderPolicy` still decides which providers may open). Honored by the
+ * built-in Deepgram and OpenAI streaming adapters.
+ */
+export interface SttConnectionHooks {
+  /**
+   * Reserve against `opening.entry` and `opening.connectionId` before resolving.
+   * Rejection forbids this socket and does not authorize a vendor fallback.
+   * The host must test `signal.aborted` inside its transaction before commit
+   * and roll back or release any late acquisition. No socket opens after abort.
+   */
+  authorize(opening: SttConnectionOpening, signal: AbortSignal): Promise<void>;
+  /**
+   * Finite per-socket funded audio ceiling, in wire seconds. Deepgram rolls to
+   * an independently authorized socket of the same vendor before exceeding it.
+   */
+  audioCeiling?(opening: SttConnectionOpening): number;
+  /**
+   * Synchronous check of prospective cumulative wire seconds before each send,
+   * including replay and overlap. `false` ends the provider with an
+   * authorization error; must not throw.
+   */
+  beforeAudio?(opening: SttConnectionOpening, nextAudioSeconds: number): boolean;
+  /**
+   * Receive cumulative and exactly one final report for every attempted socket,
+   * including final zero for a failed or denied opening. Unadopted OpenAI openings
+   * use `connectionIndex` zero; all billing identity uses `connectionId`.
+   * Queue durable processing synchronously and never throw. This is mirrored
+   * by the session's `'usage'` event for adopted sockets: consume one path, not both.
+   */
+  usage(event: SttMeasuredUsageEvent): void;
+  /** Maximum authorization wait before abort, in milliseconds. Default 10000. */
+  authorizationTimeoutMs?: number;
+}
 
 /**
  * Configuration passed to `IStreamingSTT.startSession()` when opening a new
@@ -305,6 +421,12 @@ export interface StreamingSTTConfig {
    * speaker adaptation models) without modifying the interface.
    */
   providerOptions?: Record<string, unknown>;
+
+  /** Optional accounting hooks honored by built-in Deepgram and OpenAI streaming adapters. */
+  connectionHooks?: SttConnectionHooks;
+
+  /** Call-profile identity; scoped adapters capture this and update it only through reset. */
+  call?: AudioIdentity;
 }
 
 /**
@@ -426,6 +548,20 @@ export interface TranscriptEvent {
   endMs?: number;
 
   /**
+   * `true` on a result the provider sends before the end of speech of the
+   * speech it transcribes: the session's `'speech_end'` for that speech
+   * follows it. `DeepgramStreamingSTT` sets it on every result: it emits a
+   * segment's final before the `'speech_end'` that Deepgram's `speech_final`
+   * or `UtteranceEnd` raises. A provider that sends an utterance's final
+   * after that utterance's `'speech_end'`, as `OpenAIRealtimeTranscriptionSTT`
+   * does, leaves it undefined. {@link HeuristicEndpointDetector} reads it on
+   * a final that carries an `itemId`: such a final belongs to the speech it
+   * arrives in, never to a turn that has ended, and that speech's
+   * `'speech_end'` pairs with it.
+   */
+  beforeSpeechEnd?: boolean;
+
+  /**
    * Language of `text`: the code the provider detected, or the language the
    * session was configured with (for example `'en'`). Undefined when neither
    * is known.
@@ -452,6 +588,12 @@ export interface TranscriptEvent {
 export interface StreamingSTTUsageEvent {
   /** Provider that received the audio (its `IStreamingSTT.providerId`). */
   providerId: string;
+
+  /** Built-in hosted socket UUID; custom adapters may omit it. Never substitute a local index. */
+  connectionId?: string;
+
+  /** Exact hosted `vendor:model` entry; custom adapters may omit it. */
+  entry?: string;
 
   /** Model the connection transcribed with, when the provider names one. */
   model?: string;
@@ -486,7 +628,7 @@ export interface StreamingSTTUsageEvent {
  *
  * See `IStreamingSTT.startSession()` for the factory method that creates these sessions.
  */
-export interface StreamingSTTSession extends EventEmitter {
+export interface StreamingSTTSession extends EventEmitterLike {
   /**
    * Push a raw audio frame into the recognition stream. Frames must arrive
    * in capture order; gaps or out-of-order frames degrade accuracy.
@@ -655,6 +797,38 @@ export interface TurnCompleteEvent {
 }
 
 /**
+ * What the agent is doing, as `VoicePipelineOrchestrator` reports it to its
+ * endpoint detector through `IEndpointDetector.setAgentContext()`, so the
+ * detector can tell a backchannel, a response the user makes while the agent
+ * holds the floor, from the user's own turn.
+ *
+ * @example
+ * ```typescript
+ * // The user's turn has completed: the agent holds the floor until its reply ends or a barge-in cuts it.
+ * detector.setAgentContext?.({ speaking: true });
+ * ```
+ */
+export interface EndpointAgentContext {
+  /**
+   * The agent holds the floor: its turn has begun and its reply has not
+   * ended. `VoicePipelineOrchestrator` reports `true` from the moment a
+   * user's turn completes until the reply ends or a barge-in cuts it.
+   */
+  speaking: boolean;
+  /**
+   * Whether the agent's last reply asked a question.
+   *
+   * @deprecated Ignored. A backchannel is a response made while the other
+   * party holds the floor, so `speaking` alone decides whether a final is
+   * one, and a reply's punctuation does not say whether it expects an answer
+   * ("Tell me the time you would like." asks without `?`). The property stays
+   * so that code which sets it still compiles; `VoicePipelineOrchestrator`
+   * does not set it.
+   */
+  askedQuestion?: boolean;
+}
+
+/**
  * Detects turn boundaries in a continuous audio/transcript stream.
  * Combines VAD events with linguistic signals to decide when the user
  * has finished speaking.
@@ -666,11 +840,23 @@ export interface TurnCompleteEvent {
  * | `'turn_complete'`      | {@link TurnCompleteEvent} | The user's turn has ended.           |
  * | `'speech_start'`       | *(none)*                | The user has started speaking.         |
  * | `'barge_in_detected'`  | *(none)*                | User spoke while TTS was playing.      |
+ * | `'late_final'`         | {@link TranscriptEvent} | A final that arrived after its turn ended, which the turn does not take. |
+ * | `'backchannel_detected'` | `{ text: string }`    | A final the detector dropped as a backchannel (see `isBackchannel()`). |
+ *
+ * A detector that drops such a final from its turns emits `'late_final'`
+ * with the final as it was pushed, once per final it drops
+ * ({@link HeuristicEndpointDetector} does, for an item-keyed final that
+ * arrives after a reset ended its turn and before the next `speech_end`, a
+ * standalone VAD's next `speech_start` or a reset with `'session'`, while the
+ * transcriber's next utterance is spoken included).
+ * `VoicePipelineOrchestrator` does not listen for it, so the conversation
+ * leaves those words out; `startListenSession` writes the final to its sink
+ * as a turn of its own.
  *
  * @see {@link HeuristicEndpointDetector} for the rule-based implementation.
  * @see {@link AcousticEndpointDetector} for the purely acoustic implementation.
  */
-export interface IEndpointDetector extends EventEmitter {
+export interface IEndpointDetector extends EventEmitterLike {
   /**
    * Active detection strategy:
    * - `'acoustic'` -- pure silence-timeout based (no transcript analysis).
@@ -703,9 +889,56 @@ export interface IEndpointDetector extends EventEmitter {
 
   /**
    * Reset all internal state (timers, partial transcripts) without destroying
-   * the detector instance. Called at the start of each new turn.
+   * the detector instance. Called at the start of each new turn, and with
+   * `'session'` as a session starts on the detector
+   * (`VoicePipelineOrchestrator.startSession()` and `startListenSession()`
+   * make that call), so a detector a host hands to one session after another
+   * starts each with nothing an earlier session left.
+   *
+   * @param scope - `'turn'` (the default) ends a turn, and a final of that turn
+   *   can still arrive after it ({@link HeuristicEndpointDetector} drops such a
+   *   late final and reports it as `'late_final'`, and never takes a final
+   *   marked `beforeSpeechEnd` for one); `'session'` starts a session, whose
+   *   transcriber sends no final of an earlier session's turns, so nothing
+   *   from before it is awaited.
    */
-  reset(): void;
+  reset(scope?: 'turn' | 'session'): void;
+
+  /**
+   * Tells the detector whether the agent holds the floor.
+   * `VoicePipelineOrchestrator` calls it as its session starts, after the
+   * reset with `'session'` (`speaking: false`), as a user's turn completes
+   * and the agent takes the floor (`speaking: true`), and as the agent's
+   * reply ends or a barge-in cuts it (`speaking: false`). From the first call
+   * until a reset with `'session'`, {@link HeuristicEndpointDetector} reads a
+   * final with trailing `.`, `,`, `!` or an ellipsis ("Sure.") as its phrase,
+   * never takes one that ends with `?` ("Okay?") for a backchannel, and drops
+   * a backchannel such as "yeah" only while the agent holds the floor: while
+   * the agent listens, every final is the user's, a lone "okay" included.
+   * Until the first call, and again after a reset with `'session'`, it drops
+   * a final whose whole text, trimmed and lowercased, is a backchannel
+   * phrase, whatever the agent is doing, so a caller that never calls it,
+   * such as a listen session, keeps that rule. A detector without this method
+   * is told nothing.
+   *
+   * @param context - Whether the agent holds the floor; its deprecated `askedQuestion` is ignored.
+   */
+  setAgentContext?(context: EndpointAgentContext): void;
+
+  /**
+   * Whether the detector would drop a final with this text as a backchannel
+   * now: the same phrases, the same reading of the text and the same agent
+   * context as for its own finals. `VoicePipelineOrchestrator` asks it of
+   * each final from a client that transcribes on its own device, and hands
+   * one it answers `true` for to the detector on its own, which drops it and
+   * reports it as `'backchannel_detected'`, instead of joining it into the
+   * turn's text. A detector without this method gets every client final
+   * joined with the turn's earlier ones.
+   *
+   * @param text - A final's text.
+   * @returns `true` when the detector would drop the final as a backchannel.
+   */
+  isBackchannel?(text: string): boolean;
 }
 
 // ============================================================================
@@ -812,7 +1045,7 @@ export interface DiarizedSegment extends TranscriptSegment {
  *
  * See `IDiarizationEngine.startSession()` for the factory method that creates these sessions.
  */
-export interface DiarizationSession extends EventEmitter {
+export interface DiarizationSession extends EventEmitterLike {
   /**
    * Push a raw audio frame for diarization analysis.
    *
@@ -929,6 +1162,9 @@ export interface StreamingTTSConfig {
    * they support and ignore the rest; see {@link TTSExpressiveness}.
    */
   expressiveness?: TTSExpressiveness;
+
+  /** Optional scoped synthesis request. A call-profile provider reports this identity on every chunk and usage event. */
+  call?: AudioIdentity & { requestId: string };
 }
 
 /**
@@ -946,7 +1182,7 @@ export interface StreamingTTSConfig {
  *
  * See `IStreamingTTS.startSession()` for the factory method that creates these sessions.
  */
-export interface StreamingTTSSession extends EventEmitter {
+export interface StreamingTTSSession extends EventEmitterLike {
   /**
    * Push one or more LLM output tokens into the synthesis buffer.
    * The session will chunk and synthesise them according to `StreamingTTSConfig.chunkingMode`.
@@ -972,6 +1208,12 @@ export interface StreamingTTSSession extends EventEmitter {
    * Terminate the session and release provider-side resources.
    */
   close(): void;
+
+  /** Opt-in pull contract. Await the sink before producing another chunk; never also emit that chunk as audio. */
+  setAudioSink?(sink: (chunk: EncodedAudioChunk) => Promise<void>): void;
+
+  /** Bounded text admission; the call profile requires this alongside setAudioSink. */
+  writeTokens?(tokens: string): Promise<void>;
 }
 
 /**
@@ -1166,7 +1408,10 @@ export interface IBatchSTT {
  */
 export interface BargeinContext {
   /**
-   * Duration of detected user speech before the barge-in was confirmed, in ms.
+   * Duration of the user's speech over the reply so far, in ms.
+   * `VoicePipelineOrchestrator` asks with 0 as the speech starts, then again
+   * every 100 ms while it lasts, on each of its transcripts and at its end,
+   * each time with the speech measured from its start.
    * Short durations (< 100 ms) often indicate accidental noise, lip smacks,
    * or breaths rather than intentional interruption.
    *
@@ -1183,7 +1428,9 @@ export interface BargeinContext {
   interruptedText: string;
 
   /**
-   * How many milliseconds of audio had been played at the point of interruption.
+   * How many milliseconds of the reply's audio had been sent to the transport
+   * when the handler is asked. `VoicePipelineOrchestrator` counts audio a
+   * pause holds once it is sent.
    * Combined with `interruptedText`, this allows the agent to estimate
    * how much of the response the user actually heard.
    */
@@ -1215,7 +1462,12 @@ export type BargeinAction =
       injectMarker?: string;
     }
   | {
-      /** Fade out TTS audio over `fadeMs` milliseconds then pause. */
+      /**
+       * Fade out TTS audio over `fadeMs` milliseconds then pause.
+       * `VoicePipelineOrchestrator` sends the transport this action and holds
+       * the reply's audio until the reply is cancelled or, after a false
+       * interruption, resumed with `'resume'`.
+       */
       type: 'pause';
       /** Duration of the fade-out in milliseconds. @defaultValue 150 */
       fadeMs?: number;
@@ -1223,7 +1475,9 @@ export type BargeinAction =
   | {
       /**
        * Resume TTS playback from where it was paused (only valid after a prior
-       * `'pause'` action).
+       * `'pause'` action). `VoicePipelineOrchestrator` sends it in the
+       * `barge_in` message after a false interruption, followed by the audio
+       * the pause held; a handler that answers it changes nothing there.
        */
       type: 'resume';
     }
@@ -1252,8 +1506,13 @@ export interface IBargeinHandler {
   readonly mode: 'hard-cut' | 'soft-fade';
 
   /**
-   * Called by the pipeline when a barge-in is confirmed. The handler evaluates
-   * the context and returns the action the pipeline should execute.
+   * Called by the pipeline as the user speaks over the agent's reply.
+   * `VoicePipelineOrchestrator`, without a call profile, asks as the speech
+   * starts and again as it grows (see `BargeinContext.speechDurationMs`),
+   * until the handler answers `'cancel'` or the speech's end decides, so a
+   * handler that decides by the speech's duration acts once it reaches its
+   * threshold. The handler evaluates the context and returns the action the
+   * pipeline should execute.
    *
    * @param context - Contextual snapshot at the moment of interruption.
    * @returns The action to perform (or a promise resolving to one).
@@ -1354,6 +1613,9 @@ export interface VoiceTurnMetadata {
    * Aggregate STT confidence for the complete transcript, in the range [0, 1].
    */
   transcriptConfidence: number;
+
+  /** Required on call-profile reasoning requests; absent on legacy sessions. */
+  identity?: AudioIdentity;
 }
 
 // ============================================================================
@@ -1435,6 +1697,37 @@ export interface VoicePipelineConfig {
   maxTurnDurationMs?: number;
 
   /**
+   * How long a reply paused by barge-in waits, after the user's speech ends,
+   * for that speech's final transcript, in milliseconds. A final with words
+   * cancels the reply; an empty final, a backchannel the endpoint detector
+   * recognizes, or no final within this time is a false interruption, and
+   * the reply resumes. Read without a call profile. A finite number of zero
+   * or more: `VoicePipelineOrchestrator`'s constructor throws a `RangeError`
+   * otherwise.
+   * @defaultValue 1500
+   */
+  falseInterruptionMs?: number;
+
+  /**
+   * The longest a reply stays `speaking` after its synthesis completes, in milliseconds, on a transport without
+   * `IStreamTransport.waitForPlayout()`. Such a transport cannot say when its audio has played, so the reply holds the
+   * floor for the duration of the audio it was sent: each chunk plays after the one before it, from the moment it is
+   * sent at the earliest. A barge-in over the rest of the reply interrupts it, and the reply ends, with `agent_done`,
+   * once that audio has played or this much time has passed since its synthesis completed. Read without a call
+   * profile. A finite number of zero or more: `VoicePipelineOrchestrator`'s constructor throws a `RangeError` otherwise.
+   * @defaultValue 30000
+   */
+  maxPlayoutWaitMs?: number;
+
+  /**
+   * How long the user and the agent may both be listening before the session reports the user `'away'` in
+   * `user_state_changed`, in milliseconds. The user's next speech makes the user `'speaking'` again. Unset, the user is
+   * never `'away'`. A finite number greater than zero: `VoicePipelineOrchestrator`'s constructor throws a `RangeError`
+   * otherwise.
+   */
+  userAwayTimeoutMs?: number;
+
+  /**
    * Provider-level STT options merged into `StreamingSTTConfig.providerOptions`.
    */
   sttOptions?: Record<string, unknown>;
@@ -1480,19 +1773,49 @@ export type PipelineState =
  *
  * ## Events emitted
  *
- * | Event                    | Payload                   | Description                             |
- * |--------------------------|---------------------------|-----------------------------------------|
- * | `'state_change'`         | {@link PipelineState}     | Pipeline state machine transition.      |
- * | `'turn_complete'`        | {@link TurnCompleteEvent} | User turn detected.                     |
- * | `'agent_response_start'` | *(none)*                  | Agent has begun generating a response.  |
- * | `'agent_response_end'`   | *(none)*                  | Agent response fully played.            |
- * | `'barge_in'`             | {@link BargeinContext}     | User interrupted TTS playback.          |
- * | `'error'`                | `Error`                   | Unrecoverable pipeline error.           |
- * | `'close'`                | *(none)*                  | Session has been fully torn down.       |
+ * The events of {@link VoiceSessionEventMap}, every one of which
+ * {@link VOICE_SESSION_EVENT_NAMES} lists; `on`, `once` and `off` type each
+ * listener by its event's payload. Both of `VoicePipelineOrchestrator`'s
+ * runtimes emit the same map, and the orchestrator emits it as well, except
+ * `error` and `state_change`, so a host that listens on the orchestrator
+ * before `startSession()` also hears the session start.
+ *
+ * | Event                      | Payload                                   | When                                         |
+ * |----------------------------|-------------------------------------------|----------------------------------------------|
+ * | `'agent_state_changed'`    | `{ oldState, newState, createdAt }`       | The agent's {@link VoiceAgentState} changed. |
+ * | `'user_state_changed'`     | `{ oldState, newState, createdAt }`       | The user's {@link VoiceUserState} changed.   |
+ * | `'user_input_transcribed'` | `{ transcript, isFinal, ... }`            | A transcript of the user's speech arrived.   |
+ * | `'conversation_item_added'`| `{ item, createdAt }`                     | A user turn or an agent reply joined the conversation. |
+ * | `'speech_created'`         | `{ source, userInitiated, createdAt }`    | A reply or a host prompt began to speak.     |
+ * | `'barge_in'`               | `{ speechDurationMs, action, ... }`       | The user's speech paused, resumed or cut the reply. |
+ * | `'error'`                  | `Error`                                   | The session ended on a failure (content-free). |
+ * | `'session_error'`          | `{ error, recoverable, source, createdAt }` | A failure, with where it came from and whether the session goes on. |
+ * | `'close'`                  | `{ reason, error?, createdAt }`           | The session closed.                          |
+ * | `'state_change'`           | {@link PipelineState}                     | Deprecated: read `agent_state_changed`.      |
+ * | `'turn_complete'`          | {@link TurnCompleteEvent}                 | Deprecated: read `conversation_item_added`.  |
  *
  * See `VoicePipelineOrchestrator.startSession()` for the factory method that creates these sessions.
+ *
+ * @example
+ * ```typescript
+ * session.on('agent_state_changed', ({ oldState, newState }) => console.log(`${oldState} -> ${newState}`));
+ * session.on('conversation_item_added', ({ item }) => history.push(item));
+ * ```
  */
-export interface VoicePipelineSession extends EventEmitter {
+export interface VoicePipelineSession extends EventEmitterLike {
+  /** Adds a listener for one of the session's events, typed by its payload. */
+  on<K extends keyof VoiceSessionEventMap>(event: K, listener: (payload: VoiceSessionEventMap[K]) => void): this;
+  /** Adds a listener for any event, as `EventEmitter.on()` does. */
+  on(eventName: string | symbol, listener: VoiceEventListener): this;
+  /** Adds a listener for the next one of the session's events, typed by its payload. */
+  once<K extends keyof VoiceSessionEventMap>(event: K, listener: (payload: VoiceSessionEventMap[K]) => void): this;
+  /** Adds a listener for the next event of a name, as `EventEmitter.once()` does. */
+  once(eventName: string | symbol, listener: VoiceEventListener): this;
+  /** Removes a listener of one of the session's events. */
+  off<K extends keyof VoiceSessionEventMap>(event: K, listener: (payload: VoiceSessionEventMap[K]) => void): this;
+  /** Removes a listener, as `EventEmitter.off()` does. */
+  off(eventName: string | symbol, listener: VoiceEventListener): this;
+
   /**
    * Unique, stable identifier for this session (UUID).
    */
@@ -1520,12 +1843,272 @@ export interface VoicePipelineSession extends EventEmitter {
 }
 
 // ============================================================================
+// Section 9b -- Session events
+// ============================================================================
+
+/**
+ * What the agent is doing, as `agent_state_changed` reports it. The names are
+ * LiveKit Agents' agent states (https://docs.livekit.io/agents/build/events/).
+ *
+ * - `'initializing'`: the session is starting; it reads so until `startSession()` has wired it.
+ * - `'idle'`: input is turned off, so the agent hears nothing. `VoicePipelineOrchestrator` never reports it; a host
+ *   API that can turn a session's input off does.
+ * - `'listening'`: the agent waits for the user's turn.
+ * - `'thinking'`: the user's turn has completed and the agent's reply has no word yet, or, under a call profile, a
+ *   prompt `pushToTTS()` speaks has no word yet.
+ * - `'speaking'`: the reply or the prompt has its first word, until its audio has played out or a barge-in cuts it.
+ */
+export type VoiceAgentState = 'initializing' | 'idle' | 'listening' | 'thinking' | 'speaking';
+
+/**
+ * What the user is doing, as `user_state_changed` reports it.
+ *
+ * - `'listening'`: the user is not speaking.
+ * - `'speaking'`: between a start of the user's speech and its end: the STT session's `speech_start` and
+ *   `speech_end`, a client's transcript lines from the first to open until the last closes, or, under a call profile,
+ *   from `minSpeechMs` of successive VAD speech until a frame of silence.
+ * - `'away'`: the user and the agent have both been listening for `VoicePipelineConfig.userAwayTimeoutMs`; only with
+ *   that option set. The user's next speech makes the user `'speaking'`.
+ */
+export type VoiceUserState = 'listening' | 'speaking' | 'away';
+
+/**
+ * The part of a session a `session_error` came from: its STT, TTS, agent, transport, VAD or endpoint detector, or the
+ * session itself (a listener that threw, speech from a second source, a barge-in handler that failed, a host prompt's
+ * stream of text that failed, work the session runs across its parts).
+ */
+export type VoiceSessionErrorSource = 'stt' | 'tts' | 'agent' | 'transport' | 'vad' | 'endpoint' | 'session';
+
+/** One item of the conversation, in the order the session added it (`conversation_item_added`). */
+export type VoiceConversationItem =
+  | {
+      /** A user's turn. */
+      role: 'user';
+      /** The turn's transcript, as the agent receives it. */
+      text: string;
+      /** The language of the turn's last final transcript, when its transcriber reported one. */
+      language?: string;
+      /**
+       * Where the turn came from: the session's STT (`'speech'`), a client's transcript messages (`'client'`), or a
+       * typed message (`'text'`).
+       */
+      source: 'speech' | 'client' | 'text';
+      /** Why the endpoint detector ended the turn, for a turn it ended. */
+      endpointReason?: EndpointReason;
+    }
+  | {
+      /** An agent's reply. */
+      role: 'assistant';
+      /** The reply's text, as the agent produced it. */
+      text: string;
+      /**
+       * The part of `text` the session knows was heard: all of it for a reply whose audio played out, and, for a reply
+       * a barge-in cut, the prefix the transport has acknowledged as played, which is empty while no transport reports
+       * which text it played. A partly played reply's heard extent is then unknown, and `text` is not cut to a guess;
+       * so is that of a reply whose transport's playout wait (`IStreamTransport.waitForPlayout()`) rejected.
+       */
+      playedText: string;
+      /**
+       * Whether a barge-in or another interruption cut the reply, or its audio did not play out: the transport's playout
+       * wait rejected, as a stalled LiveKit track's does once it has discarded what it had not played.
+       */
+      interrupted: boolean;
+    };
+
+/**
+ * The events of a {@link VoicePipelineSession}, by name, each with the payload its listeners get. Both runtimes of
+ * `VoicePipelineOrchestrator` emit the same map, the names after LiveKit Agents' `AgentSession` events where LiveKit
+ * has one (https://docs.livekit.io/agents/build/events/). A listener that throws is reported, and the listeners after
+ * it still run.
+ */
+export interface VoiceSessionEventMap {
+  /** The agent's state changed; LiveKit Agents' `agent_state_changed`. */
+  agent_state_changed: {
+    /** The state before. */
+    oldState: VoiceAgentState;
+    /** The state now. */
+    newState: VoiceAgentState;
+    /** When it changed, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /** The user's state changed; LiveKit Agents' `user_state_changed`. */
+  user_state_changed: {
+    /** The state before. */
+    oldState: VoiceUserState;
+    /** The state now. */
+    newState: VoiceUserState;
+    /** When it changed, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /** A transcript of the user's speech, interim or final, with words; LiveKit Agents' `user_input_transcribed`. */
+  user_input_transcribed: {
+    /** The transcript's text. */
+    transcript: string;
+    /** Whether the transcript is final. */
+    isFinal: boolean;
+    /** The transcriber's confidence in the transcript, in [0, 1], when it reported one. */
+    confidence?: number;
+    /** The transcript's language, when the transcriber reported one. */
+    language?: string;
+    /** The speaker, when every word of the transcript that names one names the same speaker. */
+    speakerId?: string;
+    /** The transcriber's or the client's key for the utterance, when it has one. */
+    itemId?: string;
+    /** When it arrived, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /** A user turn or an agent reply joined the conversation; LiveKit Agents' `conversation_item_added`. */
+  conversation_item_added: {
+    /** The item. */
+    item: VoiceConversationItem;
+    /** When it was added, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /** A reply or a host prompt began to speak: its first word; LiveKit Agents' `speech_created`. */
+  speech_created: {
+    /**
+     * `'reply'` for the agent's answer to a turn, `'say'` for a prompt the host speaks through `pushToTTS()`: under a
+     * call profile each one, which it speaks as a reply of its own, and without one a prompt pushed while a reply is
+     * speaking, whose audio goes out with the reply's.
+     */
+    source: 'reply' | 'say';
+    /** Whether the host asked for the speech (`true` for a prompt) rather than the session (`false` for a reply). */
+    userInitiated: boolean;
+    /** When it began, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /**
+   * The user's speech acted on the reply: a `'pause'` held it, a `'resume'` let it go on after a false interruption,
+   * a `'cancel'` cut it. Each matches the `barge_in` message the transport is sent; under a call profile, speech that
+   * interrupts the agent is a `'cancel'`.
+   */
+  barge_in: {
+    /** The user's speech over the reply so far, in milliseconds. */
+    speechDurationMs: number;
+    /** The reply's text so far. */
+    interruptedText: string;
+    /** The duration of the reply's audio sent so far (acknowledged as played, under a call profile), in milliseconds. */
+    playedDurationMs: number;
+    /** What the speech did to the reply. */
+    action: BargeinAction['type'];
+    /** When it happened, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /**
+   * The session ended on a failure: the content-free `Error('voice pipeline failed')`, or `Error('voice call failed
+   * (<code>)')` under a call profile, which never carries a part's own text. Existing payload and `errorMonitor`
+   * semantics remain unchanged: the `errorMonitor` listeners get the same object first.
+   */
+  error: Error;
+  /**
+   * A failure, with where it came from and whether the session goes on: the `Error` that `error` delivers for a failure
+   * that ends the session (`recoverable: false`, before `close`), or the one the orchestrator's `error` reports for one
+   * that does not, such as a transport send that rejected (`recoverable: true`).
+   */
+  session_error: {
+    /** The failure. */
+    error: Error;
+    /** `true` when the session goes on. */
+    recoverable: boolean;
+    /** The part it came from. */
+    source: VoiceSessionErrorSource;
+    /** When it happened, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /** The session closed; LiveKit Agents' `close`. */
+  close: {
+    /** Why: the reason given to the stop, `'transport_closed'` when the transport closed, or `'closed'`. */
+    reason: string;
+    /** The failure the session ended on, when it ended on one: the `Error` of `error`. */
+    error?: Error;
+    /** When it closed, in milliseconds since the epoch. */
+    createdAt: number;
+  };
+  /** @deprecated Read agent_state_changed. Emitted beside it until the next minor. */
+  state_change: PipelineState;
+  /** @deprecated Read conversation_item_added (a user item). Emitted beside it until the next minor. */
+  turn_complete: TurnCompleteEvent;
+}
+
+/** One `true` per event of {@link VoiceSessionEventMap}, so the compiler checks the list below names each once. */
+const SESSION_EVENT_KEYS: Readonly<Record<keyof VoiceSessionEventMap, true>> = {
+  agent_state_changed: true,
+  user_state_changed: true,
+  user_input_transcribed: true,
+  conversation_item_added: true,
+  speech_created: true,
+  barge_in: true,
+  error: true,
+  session_error: true,
+  close: true,
+  state_change: true,
+  turn_complete: true,
+};
+
+/**
+ * Every key of {@link VoiceSessionEventMap}, in the map's order, for hosts that relay a session's events and for
+ * the documentation's events table.
+ *
+ * @example
+ * ```typescript
+ * for (const name of VOICE_SESSION_EVENT_NAMES) session.on(name, (payload: unknown) => relay(name, payload));
+ * ```
+ */
+export const VOICE_SESSION_EVENT_NAMES: readonly (keyof VoiceSessionEventMap)[] = Object.freeze(
+  Object.keys(SESSION_EVENT_KEYS) as (keyof VoiceSessionEventMap)[]
+);
+
+// ============================================================================
 // Section 10 -- Wire protocol: client -> server messages
 // ============================================================================
 
 /**
+ * A transcript the client made itself, sent in place of audio by a client
+ * that transcribes on its own device (for example with `MoonshineBrowserSTT`
+ * in a browser). It carries the {@link TranscriptEvent} fields a display and
+ * an endpoint detector read; every interim and the final of one line carry
+ * the same `itemId`, and the final comes once, when the line is complete.
+ * `toClientTranscriptMessage()` makes one from a `TranscriptEvent`;
+ * `isClientTranscriptMessage()` checks one a server received, and
+ * `transcriptEventFromClient()` turns it back into a `TranscriptEvent`.
+ * `VoicePipelineOrchestrator` takes a session's speech from the first source
+ * it receives: a session that received audio first drops these messages, and
+ * one that received a message first drops the audio.
+ *
+ * @example
+ * ```typescript
+ * sttSession.on('transcript', (event: TranscriptEvent) => {
+ *   socket.send(JSON.stringify(toClientTranscriptMessage(event)));
+ * });
+ * ```
+ */
+export interface ClientTranscriptMessage {
+  /** Discriminator of the client message. */
+  type: 'transcript';
+  /** The line's text so far (interim), or its whole text (final); at most 4,000 characters. */
+  text: string;
+  /** Identifier of the line, at most 128 characters; every interim and the final of one line carry the same one. */
+  itemId: string;
+  /** `true` once the line is complete and will not be revised. */
+  isFinal: boolean;
+  /** Aggregate confidence of `text` in [0, 1]; read as 1 when absent. */
+  confidence?: number;
+  /**
+   * Start of the line's audio, in milliseconds counted from the first frame
+   * the client transcribed in this session.
+   */
+  startMs?: number;
+  /** End of the line's audio, on the same clock as `startMs`. */
+  endMs?: number;
+  /** Language of `text` (for example `'en'`), at most 64 characters. */
+  language?: string;
+}
+
+/**
  * Messages sent from the client (browser/app) to the server over the transport.
  * All messages are JSON-serialised.
+ * A client that transcribes on its own device sends
+ * {@link ClientTranscriptMessage}s in place of audio.
  *
  * @see {@link ServerTextMessage} for the server-to-client counterpart.
  *
@@ -1554,7 +2137,8 @@ export type ClientTextMessage =
       type: 'control';
       /** The control action to perform. */
       action: TransportControlMessage;
-    };
+    }
+  | ClientTranscriptMessage;
 
 // ============================================================================
 // Section 11 -- Wire protocol: server -> client messages
@@ -1579,13 +2163,19 @@ export type ClientTextMessage =
 export type ServerTextMessage =
   | {
       /**
-       * Sent once after the server has applied the client's `config` message
-       * and is ready to receive audio.
+       * Sent once, when the session has opened and is ready to receive audio.
+       * `VoicePipelineOrchestrator` sends it as `startSession()` completes, on a
+       * session without a call profile.
        */
       type: 'session_started';
-      /** The server-assigned session ID. */
+      /** The server-assigned session ID: the session's `sessionId`. */
       sessionId: string;
-      /** Echo of the effective configuration (may differ from client request). */
+      /**
+       * The effective configuration (may differ from the client's request).
+       * `VoicePipelineOrchestrator` sends the fields `VoicePipelineConfig`
+       * declares, less `sttOptions` and `ttsOptions`, the provider options,
+       * which can hold what a host keeps from its client.
+       */
       config: VoicePipelineConfig;
     }
   | {
@@ -1653,9 +2243,11 @@ export type ServerTextMessage =
   | {
       /**
        * Emitted as the final message before the server closes the transport.
+       * `VoicePipelineOrchestrator` sends it as a stop closes a transport that
+       * is still open, on a session without a call profile.
        */
       type: 'session_ended';
-      /** Optional human-readable reason for the session ending. */
+      /** Optional human-readable reason for the session ending: the reason the stop was given. */
       reason?: string;
     };
 
@@ -1700,4 +2292,171 @@ export interface ITranscriptInputSink extends ITranscriptSink {
    * @returns The stored turn, or undefined when a fence or terminal run drops it.
    */
   appendNext(turn: TranscriptInput): Promise<TranscriptTurn | undefined>;
+}
+
+// ============================================================================
+// Section 13 -- Scoped call runtime seams
+// ============================================================================
+
+/** Independent worker, inference and physical-transport fences. */
+export interface VoiceGeneration {
+  /** Advances only when a fenced worker replaces the previous one. */
+  workerGeneration: number;
+  /** Advances on each interruption, so output of an earlier inference cannot play. */
+  inferenceGeneration: number;
+  /** Advances on each reattachment of a physical transport. */
+  transportEpoch: number;
+}
+
+/** Stable recognition identity captured at admission, never assigned to a delayed completion. */
+export interface AudioIdentity {
+  /** The scope the audio belongs to. */
+  scopeId: string;
+  /** The call the audio belongs to. */
+  callId: string;
+  /** The recognition turn the audio belongs to. */
+  turnId: string;
+  /** The fences in force when the audio was admitted. */
+  generation: Readonly<VoiceGeneration>;
+}
+
+/** One normalized mono frame; sequence increases for the lifetime of the call, across resets. */
+export interface ScopedAudioFrame extends AudioFrame, AudioIdentity {
+  /** Always 16 kHz. */
+  sampleRate: 16000;
+  /** Always mono. */
+  channels: 1;
+  /** The frame's position in the call's input, starting at 1. */
+  sequence: number;
+  /** The fences in force when the frame was admitted. */
+  generation: VoiceGeneration;
+}
+
+/** One classified frame, with duration measured from samples rather than wall-clock silence. */
+export interface VadFrameEvent extends VadEvent, AudioIdentity {
+  /** Always a voice activity model, never a recognizer's inference. */
+  source: 'vad';
+  /** The sequence of the classified frame. */
+  sequence: number;
+  /** Duration of the classified audio, from its sample count. */
+  durationMs: number;
+  /** Whether the frame was classified as speech. */
+  speech: boolean;
+}
+
+/** Scoped recognition result. The producer preserves the input turn and generation. */
+export interface ScopedTranscriptEvent extends TranscriptEvent, AudioIdentity {}
+
+/** Scoped endpoint result. The producer preserves the input turn and generation. */
+export interface ScopedTurnCompleteEvent extends TurnCompleteEvent, AudioIdentity {}
+
+/** Content-free loss record. Resets never convert a missing interval into silence or billable speech. */
+export interface AudioGapEvent extends AudioIdentity {
+  /** A full queue, the transport, the provider, or an out-of-order or skipped sequence. */
+  reason: 'overflow' | 'transport' | 'provider' | 'sequence';
+  /** Lost audio in milliseconds, including queued audio the gap discarded. */
+  lostMs: number;
+  /** The last sequence admitted before the gap. */
+  afterSequence: number;
+}
+
+/** Factory-owned VAD. Emits vad(VadFrameEvent), error(Error); reset fences all prior asynchronous work. */
+export interface IVadSession extends EventEmitterLike {
+  /** Classifies one frame; resolves once the frame is admitted. The samples are read-only. */
+  pushAudio(frame: ScopedAudioFrame): Promise<void>;
+  /** Discards retained audio and pending work, and labels later events with `identity`. */
+  reset(identity: AudioIdentity): Promise<void>;
+  /** Classifies retained audio and emits its events. */
+  flush(): Promise<void>;
+  /** Releases the session; it accepts no audio afterwards. */
+  dispose(): Promise<void>;
+}
+
+/** Audio-aware endpointing. Emits turn_complete(ScopedTurnCompleteEvent), error(Error). */
+export interface IAudioEndpointDetector extends EventEmitterLike {
+  /** Detection strategy, as {@link IEndpointDetector.mode}. */
+  readonly mode: 'acoustic' | 'heuristic' | 'semantic';
+  /** Retains one frame for the detector's window; resolves once admitted. The samples are read-only. */
+  pushAudio(frame: ScopedAudioFrame): Promise<void>;
+  /** Consumes one classified frame, which may ask the detector to evaluate its window. */
+  pushVadEvent(event: VadFrameEvent): Promise<void>;
+  /** Consumes one scoped recognition result. */
+  pushTranscript(event: ScopedTranscriptEvent): Promise<void>;
+  /** Discards the window and pending work, and labels later results with `identity`. */
+  reset(identity: AudioIdentity): Promise<void>;
+  /** Releases the detector; it emits nothing afterwards. */
+  dispose(): Promise<void>;
+}
+
+/** Call-profile STT explicitly binds asynchronous results to their admitted input identity. */
+export interface ScopedStreamingSTTSession extends StreamingSTTSession {
+  /** Admits one frame for recognition; resolves once it is admitted. Transcripts of it carry the frame's identity. The samples are read-only. */
+  pushAudioScoped(frame: ScopedAudioFrame): Promise<void>;
+  /** Resets recognition without replay; late results retain their old identity. */
+  reset(identity: AudioIdentity): Promise<void>;
+}
+
+/** Playback acknowledged by a transport, not merely queued or sent to a socket. */
+export interface PlaybackReceipt {
+  /** The fences of the played chunk. */
+  generation: VoiceGeneration;
+  /** The played chunk's sequence within its inference generation. */
+  sequence: number;
+  /** Samples of the chunk that played. */
+  playedSamples: number;
+  /** Rate of `playedSamples`, in Hz. */
+  sampleRate: number;
+}
+
+/** Speaking transports implement these methods in addition to IStreamTransport. */
+export interface IPlaybackTransport extends IStreamTransport {
+  /** Resolves only when this chunk has played. Abort rejects the wait; clearPlayback discards physical queued data. */
+  waitForPlayback(generation: VoiceGeneration, sequence: number, signal: AbortSignal): Promise<PlaybackReceipt>;
+  /** Resolves after the publisher has discarded this generation's pending audio. */
+  clearPlayback(generation: VoiceGeneration): Promise<void>;
+  /** Optional physical setup barrier; completes before a call is considered connected. */
+  readyForPlayback?(): Promise<void>;
+}
+
+/** Cumulative supplier work for one synthesis request, including cancelled work. */
+export interface StreamingTTSUsageEvent extends AudioIdentity {
+  /** Provider that synthesized (its `IStreamingTTS.providerId`). */
+  providerId: string;
+  /** The synthesis request the report counts. */
+  requestId: string;
+  /** Characters the provider accepted so far. */
+  acceptedCharacters: number;
+  /** Samples the provider generated so far, played or not. */
+  generatedSamples: number;
+  /** Rate of `generatedSamples`, in Hz. */
+  sampleRate: number;
+  /** The request's state at this report. */
+  status: 'running' | 'completed' | 'cancelled' | 'failed';
+  /** `true` on the request's last report. */
+  final: boolean;
+}
+
+/**
+ * Compares all fences; the caller separately checks scope and call.
+ *
+ * @param a - One generation.
+ * @param b - The other generation.
+ * @returns `true` when the worker generation, inference generation and transport epoch are all equal.
+ */
+export function sameVoiceGeneration(a: Readonly<VoiceGeneration>, b: Readonly<VoiceGeneration>): boolean {
+  return a.workerGeneration === b.workerGeneration && a.inferenceGeneration === b.inferenceGeneration && a.transportEpoch === b.transportEpoch;
+}
+
+/**
+ * Copies and validates a fence so a host cannot mutate an active request's identity.
+ *
+ * @param value - The identity to copy.
+ * @returns A frozen copy, with a frozen copy of its generation.
+ * @throws {Error} When an id is empty, longer than 128 characters or not a string, or a fence is not a positive safe integer.
+ */
+export function copyAudioIdentity(value: AudioIdentity): AudioIdentity {
+  if (![value.scopeId, value.callId, value.turnId].every((x) => typeof x === 'string' && x.length > 0 && x.length <= 128)) throw new Error('invalid audio identity');
+  const g = value.generation;
+  if (![g.workerGeneration, g.inferenceGeneration, g.transportEpoch].every((x) => Number.isSafeInteger(x) && x > 0)) throw new Error('invalid audio generation');
+  return Object.freeze({ scopeId: value.scopeId, callId: value.callId, turnId: value.turnId, generation: Object.freeze({ ...g }) });
 }

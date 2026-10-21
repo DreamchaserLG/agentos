@@ -9,6 +9,7 @@
  */
 
 import { UserContext } from '../../cognition/substrate/IGMI';
+import type { CallerTurnContext } from '../../api/runtime/agencyLaunch/types';
 
 /**
  * Represents a JSON schema definition.
@@ -152,6 +153,12 @@ export interface ToolExecutionContext {
    * whose call expired starts nothing, however late its approval arrives.
    */
   signal?: AbortSignal;
+  /**
+   * Live objects of the turn that made the call: its approval gate, its budget, its explicit user, a seat's tool names
+   * and hooks, and the `processToolCall` of the view the call came through (`dispatch`). Set by gmi()'s tool hook and by
+   * a runtime seat's view; the step gate runs each step of a composed tool through `dispatch`.
+   */
+  callerTurn?: CallerTurnContext;
 }
 
 /**
@@ -208,7 +215,9 @@ export interface ITool<TInput extends Record<string, any> = any, TOutput = any> 
    * that this tool expects. This schema is used by:
    * 1. LLMs: To construct valid argument objects when requesting a tool call.
    * 2. `ToolExecutor`: For validating the arguments before invoking the tool's `execute` method.
-   * It should follow the JSON Schema specification.
+   * `ToolExecutor` reads it as JSON Schema draft-07, coercing an argument to the type the schema names where it can
+   * and filling in a `default` the schema gives. A call to a tool whose input schema does not compile fails, and the
+   * tool does not run.
    * @see https://json-schema.org/
    * @type {JSONSchemaObject}
    * @readonly
@@ -221,6 +230,10 @@ export interface ITool<TInput extends Record<string, any> = any, TOutput = any> 
    * Providing an output schema helps in validating the tool's output, provides clarity for
    * consumers of the tool's result (including other tools or the GMI), and can aid the LLM
    * in understanding what to expect back from the tool.
+   * `ToolExecutor` checks a successful result's output against it, read as JSON Schema draft-07, and answers the
+   * output as the check coerced it. An output that fails it, or an output schema that does not compile, fails the call:
+   * the executor's result keeps the output, and `ToolOrchestrator`, which the runtime calls tools through, answers the
+   * call with `output: null`, the error and its details.
    * @type {JSONSchemaObject | undefined}
    * @optional
    * @readonly
