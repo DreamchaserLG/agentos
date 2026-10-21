@@ -22,8 +22,12 @@ export const PERSONALITY_SECTION_HEADING = '## Personality & Communication Style
  */
 export const PERSONALITY_PROMPT_PRIORITY = 2;
 
-/** The traits only the persona definition sets: no role overlay, tool or rule changes them. */
-export const OPERATOR_ONLY_TRAITS: readonly HexacoTraitKey[] = ['honesty', 'emotionality'];
+/**
+ * The traits only the persona definition sets: no role overlay, tool or rule changes them. Frozen, since `readonly`
+ * binds TypeScript callers only: no code in the process can remove a trait from it and so lift the overlay rule in
+ * `applyTraitOverlay` or the refusal in `AdaptPersonalityTool`, which both read it.
+ */
+export const OPERATOR_ONLY_TRAITS: readonly HexacoTraitKey[] = Object.freeze<HexacoTraitKey[]>(['honesty', 'emotionality']);
 
 const HIGH_ABOVE = 0.65;
 const LOW_BELOW = 0.35;

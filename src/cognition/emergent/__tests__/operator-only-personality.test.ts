@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ToolExecutionContext } from '../../../core/tools/ITool.js';
+import type { HexacoTraitKey } from '../../substrate/personas/hexaco.js';
 import { NOTETAKER_PERSONA } from '../../substrate/personas/notetaker.js';
-import { OPERATOR_ONLY_TRAITS } from '../../substrate/personas/personalityPrompt.js';
+import { applyTraitOverlay, OPERATOR_ONLY_TRAITS } from '../../substrate/personas/personalityPrompt.js';
 import { AdaptPersonalityTool } from '../AdaptPersonalityTool.js';
 
 beforeEach(() => vi.stubEnv('AGENTOS_LEARNING_FREEZE', '0'));
@@ -109,5 +110,27 @@ describe('operator-only personality traits on every host', () => {
       expect(h.setPersonality).not.toHaveBeenCalled();
       expect(h.record).not.toHaveBeenCalled();
     }
+  });
+
+  it('keeps the lock list fixed at runtime, so a mutation attempt lifts neither guard on either host', async () => {
+    // `readonly` binds TypeScript callers only: a JavaScript caller holds the array both guards read.
+    const list = OPERATOR_ONLY_TRAITS as HexacoTraitKey[];
+    expect(Object.isFrozen(OPERATOR_ONLY_TRAITS)).toBe(true);
+    expect(() => list.splice(0)).toThrow(TypeError);
+    expect(() => list.push('openness')).toThrow(TypeError);
+    expect(OPERATOR_ONLY_TRAITS).toEqual(['honesty', 'emotionality']);
+    for (const withLearning of [false, true]) {
+      for (const trait of ['honesty', 'emotionality'] as const) {
+        const h = harness();
+        const result = await h.tool.execute({ trait, delta: 0.01, reasoning: 'Fixture request.' }, context(withLearning));
+        expect(result.details).toEqual({ status: 'rejected', reason: 'operator_only' });
+        expect(h.getPersonality).not.toHaveBeenCalled();
+        expect(h.setPersonality).not.toHaveBeenCalled();
+      }
+    }
+    expect(applyTraitOverlay(NOTETAKER_PERSONA, { honesty: 0.1, emotionality: 0.9 })).toEqual({
+      traits: { ...NOTETAKER_PERSONA },
+      dropped: ['honesty', 'emotionality'],
+    });
   });
 });
