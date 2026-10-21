@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { HEXACO_TRAIT_KEYS, type HexacoTraitKey } from '../hexaco.js';
 import { NOTETAKER_PERSONA } from '../notetaker.js';
-import { renderPersonalitySection, type TraitBand } from '../personalityPrompt.js';
+import { renderPersonalitySection, type PersonalityRegister, type TraitBand } from '../personalityPrompt.js';
 
 const HEADING = '## Personality & Communication Style';
 const GROUNDING = 'Change only how grounded material is presented: its length, order, tone and stated open points; never change its meaning or introduce content, suggestions or facts absent from the material.';
@@ -152,5 +152,18 @@ describe('writing and conversation registers', () => {
       expect(renderPersonalitySection(traits, { register: 'writing' })).toBeNull();
       expect(renderPersonalitySection(traits, { register: 'conversation' })).toBeNull();
     }
+  });
+
+  it('renders conversation for a register left out and refuses any other register', () => {
+    expect(renderPersonalitySection(NOTETAKER_PERSONA, { register: undefined })).toBe(PRESET_CONVERSATION);
+    // A JavaScript host is not held to the type: a misspelled register must not render without the grounding rule.
+    for (const register of ['Writing', 'written', 'writing ', '', null, 0, {}]) {
+      expect(() => renderPersonalitySection(NOTETAKER_PERSONA, { register: register as unknown as PersonalityRegister }))
+        .toThrow(TypeError);
+    }
+    // Refused before the traits are read, so a section that would be empty is refused too.
+    expect(() => renderPersonalitySection({}, { register: 'Writing' as unknown as PersonalityRegister })).toThrow(
+      "Unknown personality register 'Writing': pass 'conversation' or 'writing', or leave it out for conversation.",
+    );
   });
 });

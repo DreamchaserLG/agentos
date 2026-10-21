@@ -135,7 +135,7 @@ const section = renderPersonalitySection(NOTETAKER_PERSONA, {
 | conscientiousness | 0.85 | high |
 | openness | 0.5 | moderate |
 
-The `conversation` register is the default and preserves the existing directives. The `writing` register starts its rendered directives with the rule that style changes presentation only. A band may change length, order, tone or how stated open points are presented; it may not introduce content, facts or suggestions absent from the material. A prompt directive is not a guarantee that a model will comply. Hosts still validate generated content against their source material and their task's requirements.
+The `conversation` register is the default and preserves the existing directives. The `writing` register starts its rendered directives with the rule that style changes presentation only. A `register` other than these two throws a `TypeError` rather than rendering the conversation directives without that rule. A band may change length, order, tone or how stated open points are presented; it may not introduce content, facts or suggestions absent from the material. A prompt directive is not a guarantee that a model will comply. Hosts still validate generated content against their source material and their task's requirements.
 
 The preset's writing section is:
 

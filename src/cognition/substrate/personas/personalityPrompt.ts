@@ -123,15 +123,25 @@ export function bandOf(value: number, previous?: TraitBand): TraitBand {
  * @param traits - A trait map under any accepted spelling; anything else renders nothing.
  * @param options.bands - The band to render per trait, in place of the one its value gives (the band a learner's
  *   trait rendered last). A trait with no entry takes the band of its value.
- * @param options.register - Conversation by default; writing prepends the grounding directive.
+ * @param options.register - Conversation when left out; writing prepends the grounding directive.
  * @returns The section, or `null` when every trait is moderate in either register.
+ * @throws {TypeError} When `options.register` is given and is neither `conversation` nor `writing`.
  */
 export function renderPersonalitySection(
   traits: unknown,
   options: { bands?: Partial<Record<HexacoTraitKey, TraitBand>>; register?: PersonalityRegister } = {},
 ): string | null {
+  // The type binds TypeScript callers only: a JavaScript host's misspelled register would otherwise render the
+  // conversation directives and drop the writing register's grounding rule without a word.
+  const register: unknown = options.register;
+  if (register !== undefined && register !== 'conversation' && register !== 'writing') {
+    const shown = typeof register === 'string' ? `'${register}'` : String(register);
+    throw new TypeError(
+      `Unknown personality register ${shown}: pass 'conversation' or 'writing', or leave it out for conversation.`,
+    );
+  }
   const values = normalizeHexacoTraits(traits);
-  const writing = options.register === 'writing';
+  const writing = register === 'writing';
   const directives = writing ? WRITING_DIRECTIVES : DIRECTIVES;
   const lines: string[] = [];
   for (const key of HEXACO_TRAIT_KEYS) {
