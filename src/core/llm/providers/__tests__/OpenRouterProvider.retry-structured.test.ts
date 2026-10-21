@@ -79,12 +79,11 @@ describe('makeApiRequest retry + key rotation', () => {
 
     expect((result as { id: string }).id).toBe('gen-1');
     expect(request).toHaveBeenCalledTimes(2);
-    // The 429'd key enters cooldown, so the retry draws the OTHER key.
+    // The 429'd key leaves rotation and the request moves to the OTHER key at once, outside the attempt count: a key
+    // hop schedules no wait, so it writes no llm.retry event.
     expect(authHeaderOfCall(request, 0)).toBe('Bearer key-a');
     expect(authHeaderOfCall(request, 1)).toBe('Bearer key-b');
-    expect(logged.filter((line) => line.event === 'llm.retry')).toEqual([
-      expect.objectContaining({ provider: 'openrouter', status: 429, attempt: 1 }),
-    ]);
+    expect(logged.filter((line) => line.event === 'llm.retry')).toEqual([]);
   });
 
   it('retries transport-level failures (no HTTP response)', async () => {
