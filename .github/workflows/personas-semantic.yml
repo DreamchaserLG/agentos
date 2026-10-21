@@ -8,9 +8,12 @@ on:
 permissions:
   contents: read
 
+# A newer push to the pull request, or a label added to it, cancels the unfinished run it
+# supersedes. A re-run keys a group of its own, its run id, so re-running an older commit's
+# run never cancels the newest one.
 concurrency:
-  group: personas-semantic-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: personas-semantic-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
 
 jobs:
   semantic:
