@@ -49,16 +49,29 @@ export type { SqlSpendMeterOptions, SpendUnknownResolution } from './SqlSpendMet
 
 export {
   InMemorySpendDayStore,
+  beginOperationRun,
+  endOperationRun,
   minutesMicro,
   releaseExpiredSpend,
   releaseSpend,
+  renewOperationRun,
+  reserveOperationSpend,
   reserveSpend,
   settledTokensMicro,
   toMicro,
   tokensMicro,
   utcDay,
 } from './SpendReservations.js';
-export type { OpenReservation, SpendAdmission, SpendDayStore } from './SpendReservations.js';
+export type {
+  OpenReservation,
+  OperationAdmission,
+  OperationReservation,
+  OperationReserved,
+  RunBegin,
+  RunEnd,
+  SpendAdmission,
+  SpendDayStore,
+} from './SpendReservations.js';
 // The prices a spend admission reads, beside its rules, so `@framers/agentos/safety/runtime` carries both without loading a provider.
 export {
   OPENAI_MODEL_PRICING,
@@ -66,6 +79,10 @@ export {
   openAIModelPricing,
   openAITranscriptionPricing,
 } from '../../core/llm/providers/implementations/openaiPricing.js';
+export type { OpenAIModelPrice } from '../../core/llm/providers/implementations/openaiPricing.js';
+// Claude's prices in the same shape, from the catalog module, which loads no provider either.
+export { anthropicModelPricing } from '../../core/llm/providers/implementations/anthropicCatalog.js';
+export type { AnthropicModelPrice } from '../../core/llm/providers/implementations/anthropicCatalog.js';
 export {
   DEEPGRAM_PRE_RECORDED_PRICING,
   DEEPGRAM_STREAMING_PRICING,

@@ -17,13 +17,19 @@ import { knownProviderPrefixOf, routedProviderOf } from '../../model.js';
 import type {
   AgencyOptions,
   AgencyQuorumConfig,
+  AgencySeatConfig,
   Agent,
   BaseAgentConfig,
   AgentCallRecord,
   ApprovalRequest,
   ApprovalDecision,
+  SeatMetadata,
 } from '../types.js';
 import { AgencyQuorumError } from '../types.js';
+import { lazyLogger } from '../lazyLogger.js';
+import type { SeatInternals } from '../pool/seating.js';
+
+const agencyLogger = lazyLogger('agency');
 
 /**
  * Type guard that checks whether a value is a pre-built {@link Agent} instance
@@ -52,6 +58,32 @@ export function isAgent(value: BaseAgentConfig | Agent): value is Agent {
 }
 
 /**
+ * What the strategies read about a seat besides running it: a config's `instructions` (as its description) and
+ * `dependsOn`, or a pre-built member's own `description` and `dependsOn` when they are a non-blank string and an
+ * array of strings ({@link SeatMetadata}).
+ *
+ * @param member - A seat config or a pre-built `Agent`.
+ * @returns The seat's description and dependencies, each left out when the seat has none.
+ */
+export function seatMetadataOf(member: BaseAgentConfig | Agent): SeatMetadata {
+  if (!isAgent(member)) {
+    const config = member as BaseAgentConfig;
+    return {
+      ...(config.instructions ? { description: config.instructions } : {}),
+      ...(Array.isArray(config.dependsOn) ? { dependsOn: config.dependsOn } : {}),
+    };
+  }
+  const carried = member as Agent & { description?: unknown; dependsOn?: unknown };
+  const description =
+    typeof carried.description === 'string' && carried.description.trim() ? carried.description : undefined;
+  const dependsOn =
+    Array.isArray(carried.dependsOn) && carried.dependsOn.every((name) => typeof name === 'string')
+      ? (carried.dependsOn as string[])
+      : undefined;
+  return { ...(description ? { description } : {}), ...(dependsOn ? { dependsOn } : {}) };
+}
+
+/**
  * Enforce a post-fan-out panel quorum (parallel strategy).
  *
  * Checked against the agents that actually SUCCEEDED: `minAgents` is a
@@ -62,6 +94,8 @@ export function isAgent(value: BaseAgentConfig | Agent): value is Agent {
  * @param quorum - The agency's quorum config; `undefined` is a no-op.
  * @param settled - Successful fan-out results (name + generate result).
  * @param rosterSize - Total agents attempted, for the error message.
+ * @param cause - The first seat that failed, when one did: the error's `cause`, so the caller reads why the quorum
+ *   went unmet, an outage's own error included.
  * @throws {AgencyQuorumError} On shortfall when `onShortfall` is `'error'`
  *   (the default).
  */
@@ -69,6 +103,7 @@ export function enforceQuorum(
   quorum: AgencyQuorumConfig | undefined,
   settled: Array<{ name: string; result: Record<string, unknown> }>,
   rosterSize: number,
+  cause?: Error,
 ): void {
   if (!quorum) return;
   const minAgents = quorum.minAgents ?? 0;
@@ -83,10 +118,12 @@ export function enforceQuorum(
     `panel quorum shortfall: ${settled.length}/${rosterSize} agents succeeded ` +
     `(need ${minAgents}), ${providers.size} distinct providers (need ${minProviders})`;
   if ((quorum.onShortfall ?? 'error') === 'proceed') {
-    console.warn(`[AgentOS][Parallel] ${detail} — proceeding (onShortfall=proceed)`);
+    agencyLogger.warn(`${detail}: proceeding (onShortfall=proceed)`, { event: 'parallel_quorum_shortfall', shortfall: detail });
     return;
   }
-  throw new AgencyQuorumError(detail);
+  const shortfall = new AgencyQuorumError(detail);
+  if (cause) Object.defineProperty(shortfall, 'cause', { value: cause, writable: true, enumerable: false, configurable: true });
+  throw shortfall;
 }
 
 /**
@@ -199,12 +236,127 @@ export function buildAgentCallUsage(
 }
 
 /**
+ * The provider, model, finish reason and failover trail a seat's result
+ * reports, for its call record. A field the result does not report is left
+ * out, so a pre-built seat whose result names none adds nothing.
+ *
+ * @param result - The seat's result (`generate()`'s, or the values a stream
+ *   resolved to). May be undefined.
+ * @returns The members to spread into the seat's {@link AgentCallRecord}.
+ */
+export function callRecordExtras(
+  result: Record<string, unknown> | undefined,
+): Pick<AgentCallRecord, 'provider' | 'model' | 'finishReason' | 'fallback'> {
+  const out: Pick<AgentCallRecord, 'provider' | 'model' | 'finishReason' | 'fallback'> = {};
+  if (!result) return out;
+  const { provider, model, finishReason, fallback } = result;
+  if (typeof provider === 'string' && provider) out.provider = provider;
+  if (typeof model === 'string' && model) out.model = model;
+  if (typeof finishReason === 'string') out.finishReason = finishReason;
+  if (fallback && typeof fallback === 'object') out.fallback = fallback as AgentCallRecord['fallback'];
+  return out;
+}
+
+/**
+ * What one of an agency's own agents (the parallel and debate synthesizer, the
+ * hierarchical manager, a specialist it spawns) carries in a call of an agency
+ * with a pool or a panel: the strict rule and the call's mask that seating
+ * writes onto every seat. It then resolves the key of every hop of its chain as
+ * a seat does, never from a `setDefaultProvider()` default that names no
+ * provider, and its errors and answers leave it masked.
+ *
+ * @param mask - The call's mask; undefined in an agency without a pool or a panel.
+ * @returns The fields to spread into the agent's config; none without a mask.
+ */
+export function ownAgentInternals(mask: ((error: unknown) => unknown) | undefined): Partial<SeatInternals> {
+  return mask ? { __strictCredentials: true, __maskError: mask } : {};
+}
+
+/**
+ * The message of what a seat threw, through the call's mask when there is one;
+ * the error itself is not written.
+ *
+ * @param error - What the seat threw.
+ * @param mask - The call's mask, or undefined.
+ * @returns The message as it may be logged.
+ */
+export function maskedMessageOf(error: unknown, mask: ((error: unknown) => unknown) | undefined): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!mask) return message;
+  const masked = mask(message);
+  return typeof masked === 'string' ? masked : '[redacted]';
+}
+
+/**
+ * Whether no seat answered a result: it carries no text, no call record and
+ * no tokens, and no model returned it, as when every seat was rejected and no
+ * model was called. Such a result's text is `''`, which is no answer: the
+ * agency logs it and runs no validation retry on it, and every strategy counts
+ * a nested agency's such run as a seat that gave no answer: a rejected one
+ * ({@link nestedRunUnanswered}), under panel an empty one. A manager or a synthesizer that
+ * ran and returned no text is not such a run: a model's result carries its
+ * `finishReason`, whatever its provider reports for usage (a CLI provider
+ * reports 0 tokens when it reads none).
+ *
+ * @param result - A strategy's result, or a seat's.
+ * @returns Whether the result holds no answer, cost nothing and came from no model.
+ */
+export function noSeatAnswered(result: Record<string, unknown>): boolean {
+  const { text, agentCalls, usage, finishReason } = result;
+  const tokens = usage && typeof usage === 'object' ? (usage as { totalTokens?: unknown }).totalTokens : undefined;
+  return (
+    finishReason === undefined &&
+    (typeof text !== 'string' || text === '') &&
+    (!Array.isArray(agentCalls) || agentCalls.length === 0) &&
+    (typeof tokens !== 'number' || tokens === 0)
+  );
+}
+
+/**
+ * Whether a seat's result is a nested agency's run that no seat of its own
+ * answered. An agency's result always carries `agentCalls`, and a plain
+ * agent's never does, so a plain seat's reply with no text is the seat's
+ * answer: it counts toward the quorum and takes its debate turn.
+ *
+ * @param result - A seat's result.
+ * @returns Whether the seat is a nested agency that gave no answer.
+ */
+export function nestedRunUnanswered(result: Record<string, unknown>): boolean {
+  return Array.isArray(result.agentCalls) && noSeatAnswered(result);
+}
+
+/**
+ * {@link nestedRunUnanswered} for a seat that streamed: an agency's stream
+ * carries an `agentCalls` promise and a plain agent's does not, and the
+ * promise is read only when the seat streamed no text, cost nothing and
+ * reported no finish reason, so an answered run is never held for it. A
+ * promise that rejects is no such run.
+ *
+ * @param stream - What the seat's `stream()` returned.
+ * @param text - The text the seat streamed.
+ * @param usage - What its usage promise settled to.
+ * @param finishReason - What its finish-reason promise settled to.
+ * @returns Whether the seat is a nested agency that gave no answer.
+ */
+export async function nestedStreamUnanswered(
+  stream: { agentCalls?: unknown } | null | undefined,
+  text: string,
+  usage: unknown,
+  finishReason: unknown,
+): Promise<boolean> {
+  if (!stream || stream.agentCalls === undefined || !noSeatAnswered({ text, usage, finishReason })) return false;
+  const agentCalls = await Promise.resolve(stream.agentCalls).catch(() => undefined);
+  return nestedRunUnanswered({ text, agentCalls, usage, finishReason });
+}
+
+/**
  * Merge agency-level defaults into an agent config.
  *
  * Agent-level values take precedence over agency-level defaults. Tools are
  * merged additively: agency tools serve as a base layer and agent tools
  * override on name collision. This lets an agency provide a shared tool
  * set while individual agents can override or extend it.
+ * The agency's `runtime` becomes the seat's when the seat names none.
  *
  * @param agentConfig - Per-agent configuration (takes precedence).
  * @param agencyConfig - Agency-level fallback values (base layer).
@@ -226,7 +378,7 @@ export function buildAgentCallUsage(
 export function mergeDefaults(
   agentConfig: BaseAgentConfig,
   agencyConfig: AgencyOptions
-): BaseAgentConfig {
+): AgencySeatConfig {
   // A seat whose own model names a provider (`anthropic:claude-opus-5-5`) does
   // not inherit the agency's provider, so the prefix never meets an inherited
   // `ollama`, under which a colon is never split.
@@ -247,6 +399,8 @@ export function mergeDefaults(
   const seatRouted = routedProviderOf({ provider: used.provider, model: used.model });
   const agencyRouted = routedProviderOf(agencyConfig);
   const otherVendor = agencyRouted !== undefined && seatRouted !== agencyRouted;
+  // The agency's runtime is the default engine of a config seat; the seat's own wins.
+  const runtime = (agentConfig as AgencySeatConfig).runtime ?? agencyConfig.runtime;
   return {
     // Agency-level model/provider/apiKey/baseUrl serve as defaults.
     // They are placed BEFORE the spread of agentConfig so that agent-level
@@ -259,6 +413,7 @@ export function mergeDefaults(
     // Tools are merged separately because we want additive merging
     // (agency tools + agent tools) rather than wholesale replacement.
     tools: mergeAdaptableTools(agencyConfig.tools, agentConfig.tools),
+    ...(runtime !== undefined ? { runtime } : {}),
   };
 }
 

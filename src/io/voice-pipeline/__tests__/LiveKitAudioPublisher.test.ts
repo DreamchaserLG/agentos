@@ -211,6 +211,72 @@ describe('native playout', () => {
     await expect(f.publisher.waitForPlayback(generation, 1, new AbortController().signal)).rejects.toThrow('publisher drain timeout');
     await f.publisher.close();
   });
+  it('ends a playout wait at once on a clear or a close, though the track never reports its playout', async () => {
+    const f = native(); await f.publisher.sendAudio(unscoped());
+    f.source().waitForPlayout = () => new Promise<void>(() => {});
+    let ended = 0;
+    void f.publisher.waitForPlayout().then(() => { ended++; });
+    await settle(); expect(ended).toBe(0);
+    await f.publisher.clearPlayback(generation); await settle(); expect(ended).toBe(1);
+    await f.publisher.sendAudio(unscoped());
+    void f.publisher.waitForPlayout().then(() => { ended++; });
+    await settle(); expect(ended).toBe(1);
+    await f.publisher.close(); await settle(); expect(ended).toBe(2);
+  });
+  it('gives a playout wait up when a capture stalls for receiptTimeoutMs plus maxDurationMs, and clears the stalled frame as it lands', async () => {
+    const f = native(); await f.publisher.ready();
+    let land!: () => void; f.source().gate = new Promise<void>((resolve) => { land = resolve; });
+    // The first chunk's capture does not return while the gate holds, and the second waits behind it.
+    const first = f.publisher.sendAudio(unscoped()); const second = f.publisher.sendAudio(unscoped());
+    await settle();
+    let outcome: string | undefined;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      void f.publisher.waitForPlayout().then(() => { outcome = 'played'; }, (error: Error) => { outcome = error.message; });
+      await settle();
+      // receiptTimeoutMs is 1000 and maxDurationMs 2000.
+      await vi.advanceTimersByTimeAsync(2_999); await settle(); expect(outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1); await settle(); expect(outcome).toBe('publisher drain timeout');
+      expect(f.source().clears).toBe(1);
+    } finally { vi.useRealTimers(); }
+    // The stalled frame lands later and is cleared as it lands; the chunk queued behind it is never captured.
+    f.source().gate = undefined; land(); await first; await second;
+    expect(f.source().capturedSamples).toBe(960); expect(f.source().clears).toBe(2);
+    await f.publisher.close();
+  });
+  it('handles a rejection of a native playout wait that a close cut short', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const f = native(); await f.publisher.sendAudio(unscoped());
+      let fail!: (error: Error) => void; let closing: Promise<void> | undefined;
+      // A close lands as the native playout wait begins, and that wait rejects afterwards, as a source being disposed may.
+      f.source().waitForPlayout = () => { closing = f.publisher.close(); return new Promise<void>((_resolve, reject) => { fail = reject; }); };
+      await f.publisher.waitForPlayout();
+      fail(new Error('source disposed')); await settle();
+      expect(unhandled).toEqual([]);
+      await closing;
+    } finally { process.off('unhandledRejection', onUnhandled); }
+  });
+  it('starts the playout bound once the track is published, so a first publish slower than the bound drops nothing', async () => {
+    let publish!: () => void;
+    const participant = { publishTrack: vi.fn(() => new Promise<{ sid: string }>((resolve) => { publish = () => resolve({ sid: 'track-a' }); })), unpublishTrack: vi.fn(async () => {}) };
+    const publisher = new LiveKitAudioPublisher({ scopeId: 'scope-a', callId: 'call-a', generation: () => generation, sampleRate: 48000, maxBytes: 256000, maxDurationMs: 2000, receiptTimeoutMs: 1000, rtc: fakePublishingRtc() }, participant, async () => {});
+    let outcome: string | undefined;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const sent = publisher.sendAudio(unscoped());
+      void publisher.waitForPlayout().then(() => { outcome = 'played'; }, (error: Error) => { outcome = error.message; });
+      await settle();
+      // The publish takes longer than receiptTimeoutMs plus maxDurationMs, and the wait does not give up meanwhile.
+      await vi.advanceTimersByTimeAsync(5_000); await settle(); expect(outcome).toBeUndefined();
+      publish(); await sent;
+      expect(FakeAudioSource.created[0]!.capturedSamples).toBe(960);
+      FakeAudioSource.created[0]!.playOut(); await settle(); expect(outcome).toBe('played');
+    } finally { vi.useRealTimers(); }
+    await publisher.close();
+  });
   it('holds the track on a pause: clears its queue, captures nothing until the resume, then the held chunks in order', async () => {
     const f = native(); await f.publisher.ready();
     let free!: () => void; f.source().gate = new Promise<void>((resolve) => { free = resolve; });
@@ -237,6 +303,31 @@ describe('native playout', () => {
     const f = native(); await f.publisher.sendAudio(unscoped());
     const playback = expect(f.publisher.waitForPlayback(generation, 1, new AbortController().signal)).rejects.toThrow('publisher cancelled');
     await settle(); f.publisher.pause(); await playback;
+    await f.publisher.close();
+  });
+  it('does not count a chunk as played when a pause cleared it before its playback wait began', async () => {
+    const f = native(); await f.publisher.sendAudio(unscoped());
+    // The pause comes after the send resolved and before the wait begins; a resume does not bring the audio back.
+    f.publisher.pause(); f.publisher.resume();
+    await expect(f.publisher.waitForPlayback(generation, 1, new AbortController().signal)).rejects.toThrow('publisher cancelled');
+    // A chunk the track takes after the resume counts once it has played out.
+    await f.publisher.sendAudio(unscoped()); const next = f.publisher.waitForPlayback(generation, 2, new AbortController().signal);
+    f.source().playOut(); expect(await next).toMatchObject({ sequence: 2, playedSamples: 320, sampleRate: 16000 });
+    await f.publisher.close();
+  });
+  it('clears a frame whose capture was under way as a pause came, even when a resume came before it landed', async () => {
+    const f = native(); await f.publisher.ready();
+    let free!: () => void; f.source().gate = new Promise<void>((resolve) => { free = resolve; });
+    const sent = f.publisher.sendAudio(unscoped());
+    // A false interruption: the pause and the resume both come while the frame's capture waits for room in the queue.
+    await settle(); f.publisher.pause(); f.publisher.resume(); expect(f.source().clears).toBe(1);
+    f.source().gate = undefined; free(); await sent;
+    // The frame landed after the pause's clear and is cleared as it lands, so nothing from before the pause plays after it.
+    expect(f.source().clears).toBe(2);
+    let drained = false; void f.source().waitForPlayout().then(() => { drained = true; }); await settle(); expect(drained).toBe(true);
+    // The track takes the next chunk as usual.
+    await f.publisher.sendAudio(unscoped()); const next = f.publisher.waitForPlayback(generation, 2, new AbortController().signal);
+    f.source().playOut(); expect(await next).toMatchObject({ sequence: 2, playedSamples: 320, sampleRate: 16000 });
     await f.publisher.close();
   });
   /** A publisher left to its default playout and without a call identity, published by `room`'s local participant. */

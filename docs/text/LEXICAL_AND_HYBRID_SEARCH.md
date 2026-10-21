@@ -63,11 +63,11 @@ IDF(t)   = ln((N - n(t) + 0.5) / (n(t) + 0.5) + 1)
 
 The index keeps no text: a hit carries its id, score and metadata, and the caller keeps the texts and places a snippet with [`snippetAround`](./CHUNKING_AND_SNIPPETS.md#snippets).
 
-`toJSON()` answers version 1 of the format: `{ v: 1, k1, b, documents, terms }`, with each document as `[id, length]` or `[id, length, metadata]` and each term as `[term, postings]`, a posting being `[the document's position in documents, the term's count in it]`. It holds terms, not texts, so `fromJSON` is given the tokenizer the index was made with. A saved index of another version throws, and so does one with any of these faults: `k1` or `b` not a finite number, a part out of shape, a document id or a term given twice, a document position given twice in one term's postings, a position that is not a document's, a length that is not a whole number of 0 or more, or a count that is not a whole number of 1 or more. The error names what is wrong. The restore does not check for an empty document id or a term with no postings, neither of which `addDocument()` produces. Metadata is saved as given, so keep it to values JSON can hold.
+`toJSON()` answers version 1 of the format: `{ v: 1, k1, b, documents, terms }`, with each document as `[id, length]` or `[id, length, metadata]` and each term as `[term, postings]`, a posting being `[the document's position in documents, the term's count in it]`. It holds terms, not texts, so `fromJSON` is given the tokenizer the index was made with. A saved index of another version throws, and so does one that `toJSON()` could not have written: `k1` or `b` not a finite number, a part out of shape or an entry with more parts than `toJSON()` writes, an empty document id, a document id or a term given twice, a term with no postings, a document position given twice in one term's postings, a position that is not a document's, a length that is not a whole number of 0 or more, a count that is not a whole number of 1 or more, or a document whose counts over all terms do not add up to its length. The error names what is wrong. A term's text and a document's metadata are taken as given, since a tokenizer can answer any string; keep metadata to values JSON can hold.
 
 ### In a browser
 
-A page imports `@framers/agentos/cognition/library/browser`. It exports `LexicalIndex`, `FuzzyIndex`, `withinOneEdit`, `lexicalTokens`, `snippetAround` and `chunkTurns` with their types, and the page's own storage: a key-value store over IndexedDB or memory, an outbox and `reconcileList`. Nothing it reaches imports a Node module or a package, which a test holds by walking its import graph. [Library Index: On a device](../features/LIBRARY_INDEX.md#on-a-device) lists every export and builds a page's index from a transcript's passages with `lexicalTokens`.
+A page imports `@framers/agentos/cognition/library/browser`. It exports `LexicalIndex`, `FuzzyIndex`, `withinOneEdit`, `lexicalTokens`, `snippetAround` and `chunkTurns` with their types, the page's own storage: a key-value store over IndexedDB or memory, an outbox and `reconcileList`, and the readers of transcript files from other notetakers with the plan of an archive's entries. Nothing it reaches imports a Node module or a package, which a test holds by walking its import graph. [Library Index: On a device](../features/LIBRARY_INDEX.md#on-a-device) lists every export and builds a page's index from a transcript's passages with `lexicalTokens`.
 
 ## BM25Index
 
@@ -98,7 +98,7 @@ index.search('refund')[0].passages;
 // [{ text: 'A refund goes back to the card that paid.', marks: [{ start: 2, end: 8 }] }]
 ```
 
-A query word matches a stored word that is the same (it counts 1), a word it begins (0.75), or a word one edit away (0.5): a letter added, dropped or changed, or two letters side by side swapped, where both words have `editMinLength` letters or more. A document's score is, for each query word, its best match's count times the weight of the field that match is in, summed over the query's words. The score does not weigh a word by how rare it is, as BM25 does.
+A query word matches a stored word that is the same (it counts 1), a word it begins (0.75), or a word one edit away (0.5): a letter added, dropped or changed, or two letters side by side swapped, where both words have `editMinLength` letters or more. A document's score is, for each query word, its best match's count times the weight of the field that match is in, summed over the query's words. A word the query repeats counts once, in any case and with or without its accents, where BM25 adds it each time. The score does not weigh a word by how rare it is, as BM25 does.
 
 | Member | What it does |
 |---|---|
@@ -162,14 +162,25 @@ reciprocalRankFusion(
 // b: 0.7/62 + 0.3/61 ≈ 0.0162, then a: 0.7/61 ≈ 0.0115, then c: 0.3/62 ≈ 0.0048
 ```
 
+`fuseRanked(lists, { idOf, k, weights, perList, groupOf, perGroup, limit })`, exported from `@framers/agentos/cognition/rag`, fuses any number of ranked lists of any items. Each list is in its own order, best first. `idOf` tells the items apart: an item that stands in several lists is one fused item, kept as its first list holds it, and an item twice in one list counts once, at its better rank. An item's score is the sum, over the lists it stands in, of the list's weight (`weights[place]`, 1 for a list with none) over `k` (60) plus its rank there. The order is by score, then by the first list the item stands in, then by its rank there, then by its id, so the same input gives the same answer on every call. Two lists fused with their weights give `reciprocalRankFusion`'s scores and order, but for a tie, which that function breaks by the id alone, and an item twice in one list, which it scores at each of its ranks. Then the caps, walking that order: an item is passed over when its first list already gave `perList` items (one number for every list, or one a list by place) or its group, read by `groupOf`, already gave `perGroup`, and the walk stops at `limit`. Each answer is `{ item, id, score, list, ranks }`: the item, its id, its score, the place of its first list and its rank in each list it stands in. A `k` or a weight that is not a finite number, zero or more, or a cap (`perList`, `perGroup`, `limit`) that is not a whole number, zero or more, or positive infinity, throws a `RangeError`; `perGroup` without `groupOf` throws a `TypeError`.
+
+```typescript
+import { fuseRanked } from '@framers/agentos/cognition/rag';
+
+const notes = [{ id: 'n1', note: 'offsite' }, { id: 'n2', note: 'offsite' }, { id: 'n3', note: 'budget' }];
+const call = [{ id: 'c1', note: 'call' }, { id: 'n1', note: 'offsite' }];
+fuseRanked([notes, call], { idOf: (item) => item.id, weights: [1, 0.8], groupOf: (item) => item.note, perGroup: 1 });
+// n1: 1/61 + 0.8/62 ≈ 0.0293, then n3: 1/63 ≈ 0.0159, then c1: 0.8/61 ≈ 0.0131; n2 is passed over, its note already gave one
+```
+
 `@framers/agentos/cognition/web-search` exports the fusion and deduplication that `WebSearchService` runs over the results of several search providers. They are pure functions:
 
 | Function | What it does |
 |---|---|
-| `normalizeUrl(url)` | Drops the `http://` or `https://`, a leading `www.`, the slashes the URL ends with, and each `utm_*`, `ref`, `source`, `fbclid` and `gclid` parameter with the `?` or `&` before it, then a `?` left at the end. |
+| `normalizeUrl(url)` | Drops the `http://` or `https://`, a leading `www.`, the slashes the path ends with and each `utm_*`, `ref`, `source`, `fbclid` and `gclid` parameter. The parameters that stay keep their order behind one `?`, and a fragment stays: `https://www.example.com/a/?utm_source=x&id=5#top` is `example.com/a?id=5#top`. |
 | `computeRRF(candidates, k = 60)` | Sets each candidate's `rrfScore` to the sum of `1 / (k + rank)` over its `providerRanks`, and sorts the array best first. |
 | `computeWeightedRRF(candidates, weights, k = 60)` | The same, with each term multiplied by `weights[provider]`, 1 for a provider not in `weights`. |
-| `semanticDedup(candidates, threshold = 0.85)` | Merges candidates whose normalized URLs are equal, then those whose snippets' term-frequency vectors have a cosine of at least `threshold`. A merged candidate keeps every provider's rank, the first one's text, the other's `content` when it had none, and the higher `relevanceScore`. |
+| `semanticDedup(candidates, threshold = 0.85)` | Merges candidates whose normalized URLs are equal, then those whose snippets' term-frequency vectors have a cosine of at least `threshold`; the vectors carry no inverse document frequency, so words every snippet holds count fully. The first candidate of a group stays and gains, with their ranks, the providers only a later one holds; it keeps its own text, takes a later one's `content` when it has none, and the higher `relevanceScore`. The candidates it is given are left as they were. |
 | `buildVocabulary(texts)`, `buildTfVector(text, vocabulary)` | The vocabulary and the vectors `semanticDedup` compares: lower-cased words split at every character other than an ASCII letter, digit or underscore (so `café` gives `caf`), each count divided by the text's word count. |
 
 `WebSearchService` records each provider's ranks from 0 and weighs each provider by its `weight`, so a provider's first result adds `weight / 60`.
