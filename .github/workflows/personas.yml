@@ -45,5 +45,5 @@ jobs:
           scripts/personas/verify-release.ts
       - name: Import the built entry without a source alias
         run: node --experimental-strip-types --test scripts/personas-public-entry.acceptance.ts
-      - name: Exercise semantic runner failures without credentials
+      - name: Exercise the semantic runner and the release check without credentials
         run: node --experimental-strip-types --test scripts/personas/semantic.acceptance.ts

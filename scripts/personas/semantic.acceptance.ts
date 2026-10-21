@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { GROUNDING_FIXTURES } from './grounding-fixtures.ts';
 import {
   profiles,
@@ -112,4 +116,40 @@ test('propagates provider failure and never retries it as a passing result', asy
     record: async () => {},
   }), /fixture provider unavailable/);
   assert.equal(calls, 1);
+});
+
+/** The published-package check, which the dispatched workflow runs as a script. */
+const verifier = fileURLToPath(new URL('./verify-release.ts', import.meta.url));
+/** Answers every registry read with a 404, so a version the gate lets through stops at the next check, offline. */
+const offlineRegistry = `--import=data:text/javascript,${encodeURIComponent('globalThis.fetch = async () => new Response(null, { status: 404 });')}`;
+
+/** Runs the published-package check for one version and returns its exit status and error output. */
+function verifyRelease(version: string): { status: number | null; stderr: string } {
+  const result = spawnSync(process.execPath, ['--experimental-strip-types', offlineRegistry, verifier], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PERSONAS_VERSION: version,
+      PERSONAS_MERGE: '0'.repeat(40),
+      PERSONAS_PACKAGE_DIR: join(tmpdir(), 'personas-release-gate'),
+      GITHUB_OUTPUT: '',
+    },
+  });
+  return { status: result.status, stderr: result.stderr };
+}
+
+test('refuses a 0.14.x patch before reading the registry and lets 0.15.0 or later on to it', () => {
+  // The persona change is breaking, so it ships in a new minor: a 0.14.x patch is refused even when it holds the merge.
+  for (const version of ['0.13.165', '0.14.25', '0.14.26', '0.14.27']) {
+    const run = verifyRelease(version);
+    assert.notEqual(run.status, 0, `${version} passed the release check`);
+    assert.match(run.stderr, /a new minor after 0\.14\.x is required/);
+    assert.doesNotMatch(run.stderr, /not yet on the registry/);
+  }
+  for (const version of ['0.15.0', '0.15.4', '1.0.0']) {
+    const run = verifyRelease(version);
+    assert.notEqual(run.status, 0, `${version} passed the release check with no registry`);
+    assert.doesNotMatch(run.stderr, /a new minor after/);
+    assert.match(run.stderr, /the exact release is not yet on the registry/);
+  }
 });

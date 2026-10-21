@@ -11,7 +11,8 @@ assert.match(version, /^\d+\.\d+\.\d+$/);
 assert.match(merge, /^[0-9a-f]{40}$/);
 assert.ok(directory);
 const [major, minor] = version.split('.').map(Number);
-assert.ok(major! > 0 || minor! > 13, 'a new minor after 0.13.165 is required');
+// The persona change is breaking, so only a new minor after the 0.14 line carries it; a 0.14.x patch is refused.
+assert.ok(major! > 0 || minor! > 14, 'a new minor after 0.14.x is required');
 const response = await fetch(`https://registry.npmjs.org/@framers%2Fagentos/${version}`);
 assert.equal(response.status, 200, 'the exact release is not yet on the registry');
 const metadata = await response.json() as {
