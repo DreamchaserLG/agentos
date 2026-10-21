@@ -32,6 +32,11 @@ const common = {
   cache: false as const,
   budget,
 };
+/**
+ * A call's whole deadline. An abort signal ends the call with no further retry, so it covers every attempt's own
+ * request timeout and 30 seconds for the waits between them; requestTimeout still bounds each attempt.
+ */
+const callDeadlineMs = common.maxAttempts * common.requestTimeout + 30_000;
 const writerTask = [
   'Write short meeting notes from the supplied transcript.',
   'Preserve every stated decision, condition, time, amount and unresolved question.',
@@ -59,7 +64,7 @@ try {
     write: async ({ source, section }) => {
       const result = await generateText({
         ...common, model: writerModel, system: `${section}\n\n${writerTask}`,
-        prompt: source, maxSteps: 1, abortSignal: AbortSignal.timeout(120_000),
+        prompt: source, maxSteps: 1, abortSignal: AbortSignal.timeout(callDeadlineMs),
       });
       return result.text;
     },
@@ -67,7 +72,7 @@ try {
       const result = await generateObject({
         ...common, model: judgeModel, schema: GroundingVerdict, schemaName: 'grounded_writing_verdict',
         system: judgeTask, prompt: JSON.stringify(input), maxRetries: 0,
-        abortSignal: AbortSignal.timeout(120_000),
+        abortSignal: AbortSignal.timeout(callDeadlineMs),
       });
       return result.object;
     },
