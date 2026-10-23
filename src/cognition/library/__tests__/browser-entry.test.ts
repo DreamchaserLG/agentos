@@ -61,24 +61,32 @@ function outside(reached: Map<string, string[]>): string[] {
   return found;
 }
 
+/** The checkout of the library beside this one, when there is one: vitest.config.ts aliases the package to its source. */
+const SIBLING_LIBRARY = resolve(here, '../../../../../sql-storage-adapter');
+
 /**
- * The library's key-value module as the entry reaches it: the published file its package names under `./kv`, or, in
- * a checkout of the library beside this one that has no build, that module's source.
+ * The library's key-value module as the tests reach it: in a checkout of the library beside this one, that module's
+ * source, which vitest.config.ts aliases `@framers/sql-storage-adapter/kv` to whenever the sibling's `src/index.ts`
+ * exists, whether or not the sibling holds a build; otherwise the published file the installed package names under
+ * `./kv`.
  */
 function libraryKvEntry(): string {
+  if (existsSync(join(SIBLING_LIBRARY, 'src/index.ts'))) {
+    const source = join(SIBLING_LIBRARY, 'src/features/kv/index.ts');
+    if (!existsSync(source)) throw new Error(`the library beside this checkout has no ${source}, where vitest.config.ts sends ${KV}`);
+    return source;
+  }
   const manifestPath = createRequire(import.meta.url).resolve('@framers/sql-storage-adapter/package.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
-    exports: Record<string, string | { import?: string | { default?: string }; default?: string }>;
+    exports: Record<string, string | { import?: string | { default?: string }; default?: string } | undefined>;
   };
   const kv = manifest.exports['./kv'];
+  if (kv === undefined) throw new Error("the library's package.json names no ./kv export");
   const target = typeof kv === 'string' ? kv : typeof kv.import === 'string' ? kv.import : (kv.import?.default ?? kv.default);
-  const candidates = [
-    ...(target ? [resolve(dirname(manifestPath), target)] : []),
-    resolve(dirname(manifestPath), 'src/features/kv/index.ts'),
-  ];
-  const found = candidates.find((candidate) => existsSync(candidate));
-  if (found === undefined) throw new Error(`the library's ./kv export names no file (tried ${candidates.join(', ')})`);
-  return found;
+  if (target === undefined) throw new Error(`the library's ./kv export names no file: ${JSON.stringify(kv)}`);
+  const published = resolve(dirname(manifestPath), target);
+  if (!existsSync(published)) throw new Error(`the library's ./kv export names ${published}, which does not exist`);
+  return published;
 }
 
 describe('the library\'s browser entry', () => {
