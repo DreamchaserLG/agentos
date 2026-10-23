@@ -135,7 +135,8 @@ describe('the browser key-value store, in the browser', () => {
       expect(store.memoryOnly).toBe(false);
       expect(await store.keys('')).toEqual(Object.keys(written).sort());
       for (const [key, value] of Object.entries(written)) expect(await store.get(key), key).toEqual(value);
-      expect(await namespaced(store, 'acct/').keys('lib/')).toEqual(['s/1', 's/2']);
+      // A namespaced store answers its keys without the namespace, with the prefix asked for still on them.
+      expect(await namespaced(store, 'acct/').keys('lib/')).toEqual(['lib/s/1', 'lib/s/2']);
     } finally {
       store.close();
     }
