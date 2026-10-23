@@ -75,6 +75,23 @@ export function outboxOverSqlStore(backend: string, open: () => Promise<StorageA
       expect(await outbox.waitingFor('n2')).toBe(false);
     });
 
+    it('refuses a value holding a Blob with a DataCloneError before anything is written: the key keeps what it held and the outbox holds nothing', async () => {
+      const store = await createSqlKeyValueStore(await adapter(), { table: 'agentos_outbox_host_objects' });
+      /** The name of the error `call` rejected with, or null when it resolved. */
+      const refusal = (call: Promise<unknown>): Promise<unknown> =>
+        call.then(
+          () => null,
+          (error: unknown) => (error as { name?: unknown }).name,
+        );
+      await store.set('k', 'before');
+      expect(await refusal(store.set('k', { photo: new Blob(['x']) }))).toBe('DataCloneError');
+      expect(await store.get('k')).toBe('before');
+      const outbox = new Outbox(store, { prefix: 'o/', now: () => 0 });
+      expect(await refusal(outbox.add('upload', { photo: new Blob(['x']) }, 'p1'))).toBe('DataCloneError');
+      expect(await outbox.pending()).toEqual([]);
+      expect(await store.keys('')).toEqual(['k']);
+    });
+
     it('reads through a second connection what the first held, and what the second sent is gone for a third', async () => {
       const table = 'agentos_outbox_shared';
       const first = await open();
