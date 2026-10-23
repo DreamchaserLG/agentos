@@ -31,7 +31,7 @@ const sqlJsConfig = { locateFile: (file: string): string => `/@fs${dist}/${file}
 const unique = (name: string): string => `${name}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 /** The adapter's options as docs/memory/CLIENT_SIDE_STORAGE.md gives them, with the test server's sql.js files. */
-const documented = (dbName: string): IndexedDbAdapterOptions => ({ dbName, sqlJsConfig, durability: 'commit' });
+const documented = (dbName: string): IndexedDbAdapterOptions => ({ dbName, sqlJsConfig, crossTab: true });
 
 /** The one database every open of the shared suite opens. */
 const dbName = unique('agentos-outbox');
