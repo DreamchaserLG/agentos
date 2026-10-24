@@ -10,6 +10,10 @@
  * - **Endpoint:** `wss://api.deepgram.com/v1/listen`
  * - **Authentication:** `Authorization: Token <apiKey>` on the upgrade
  * - **Inbound (client → Deepgram):** 16 kHz mono PCM16 frames, converted from each frame's own rate
+ * - **KeepAlive:** a `{"type":"KeepAlive"}` text frame after every 3 s that sends no
+ *   audio, since Deepgram closes a socket that receives neither audio nor a
+ *   `KeepAlive` within 10 s (`NET-0001`) — a source whose capture pauses keeps
+ *   its session instead of losing the socket and paying for a reconnect
  * - **Outbound (Deepgram → client):** JSON messages with transcript results
  * - **Close:** Send `CloseStream`, then close the socket after draining
  *
@@ -208,6 +212,18 @@ const CONNECT_TIMEOUT_MS = 8_000;
 const WIRE_SAMPLE_RATE = 16_000;
 
 /**
+ * Idle gap after the last audio frame that triggers a `KeepAlive` text frame.
+ * Deepgram closes a streaming socket that receives neither audio nor a
+ * `KeepAlive` within a 10-second window (`NET-0001`) and asks for a
+ * `{"type":"KeepAlive"}` text frame every 3 to 5 seconds while audio pauses,
+ * so 3 seconds keeps the socket alive with a margin and sends nothing while
+ * frames keep flowing.
+ *
+ * @see https://developers.deepgram.com/docs/audio-keep-alive
+ */
+const KEEPALIVE_IDLE_MS = 3_000;
+
+/**
  * A live streaming STT session connected to Deepgram over one WebSocket.
  * Emits `transcript`, `speech_start`, `speech_end`, `usage`, `error`, and
  * `close` events as required by the voice pipeline orchestrator.
@@ -230,6 +246,7 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
    */
   private openItemSpeechEnded = false;
   private usageTimer: ReturnType<typeof setInterval> | undefined;
+  private keepAliveTimer: ReturnType<typeof setTimeout> | undefined;
 
   /** Wire seconds sent on this socket so far. */
   get audioSeconds(): number {
@@ -290,6 +307,7 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
     this.closed = true;
     if (this.usageTimer) clearInterval(this.usageTimer);
     this.usageTimer = undefined;
+    this.clearKeepAlive();
     this.meter.cancelAuthorization();
     this.retractOpenItem();
     this.endSpeech();
@@ -395,6 +413,7 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
         if ((this.config.usageIntervalMs ?? 0) > 0) {
           this.usageTimer = setInterval(() => this.reportUsage(false), this.config.usageIntervalMs);
         }
+        this.scheduleKeepAlive();
         resolve();
       });
       socket.on('error', (error) => fail(error as Error));
@@ -439,11 +458,15 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
     }
     this.ws.send(pcm);
     this.samplesSent += samples.length;
+    // Frames flowing keep the socket fed; restart the idle clock each time so
+    // a KeepAlive goes out only during a pause.
+    this.scheduleKeepAlive();
   }
 
   /** Requests final results; the existing 200 ms drain bound is preserved. */
   async flush(): Promise<void> {
     if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.clearKeepAlive();
     this.ws.send(JSON.stringify({ type: 'CloseStream' }));
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
   }
@@ -466,6 +489,30 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
     if (this.speechActive) return;
     this.speechActive = true;
     this.emit('speech_start');
+  }
+
+  /**
+   * Arms the one-shot idle timer whose expiry sends Deepgram's `KeepAlive`.
+   * Rescheduled by every frame actually sent (`pushAudio`) and by each
+   * `KeepAlive` itself, so the frame goes out only while audio pauses; a
+   * session that has ended, a socket that is no longer open, or the final
+   * drain after `CloseStream` (`flush`) arms nothing.
+   */
+  private scheduleKeepAlive(): void {
+    this.clearKeepAlive();
+    if (this.closed) return;
+    this.keepAliveTimer = setTimeout(() => {
+      this.keepAliveTimer = undefined;
+      const socket = this.ws;
+      if (this.closed || !socket || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ type: 'KeepAlive' }));
+      this.scheduleKeepAlive();
+    }, KEEPALIVE_IDLE_MS);
+  }
+
+  private clearKeepAlive(): void {
+    if (this.keepAliveTimer) clearTimeout(this.keepAliveTimer);
+    this.keepAliveTimer = undefined;
   }
 
   /** Ends VAD without ending an item whose final can still arrive. */

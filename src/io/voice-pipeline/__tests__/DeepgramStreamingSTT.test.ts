@@ -5,7 +5,7 @@
  * without hitting the real service.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 
 // Must use factory that doesn't reference outer scope
@@ -217,5 +217,125 @@ describe('DeepgramStreamingSTT', () => {
     const nova2Params = new URL((nova2Session as any).ws.url).searchParams;
     expect(nova2Params.getAll('keywords')).toEqual(keywords);
     expect(nova2Params.has('keyterm')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// KeepAlive while audio pauses (#585)
+//
+// Deepgram closes a streaming socket that receives neither audio nor a
+// KeepAlive text frame within 10 s (NET-0001) and asks for one every 3–5 s
+// while audio pauses. These tests pin the idle-reset schedule: every sent
+// frame restarts the 3 s clock, a pause sends KeepAlive frames until frames
+// return, and an ended session — closed, server-cut, or draining after
+// CloseStream — arms nothing.
+// ---------------------------------------------------------------------------
+
+describe('DeepgramStreamingSTT – KeepAlive while audio pauses', () => {
+  /** Text frames sent on the mock socket; audio frames are Buffers. */
+  const textFrames = (ws: any): string[] =>
+    ws.send.mock.calls.filter((call: unknown[]) => typeof call[0] === 'string').map((call: unknown[]) => call[0] as string);
+
+  const KEEPALIVE = JSON.stringify({ type: 'KeepAlive' });
+
+  /** Starts a session with the timers already faked, so every keepalive timer is fake. */
+  const startSession = async () => {
+    const session = await keepAliveStt.startSession({ language: 'en-US' });
+    return { session, ws: (session as any).ws };
+  };
+
+  const frame = { samples: new Float32Array(160), sampleRate: 16000, timestamp: 0 };
+
+  let keepAliveStt: DeepgramStreamingSTT;
+
+  beforeEach(() => {
+    keepAliveStt = new DeepgramStreamingSTT({ apiKey: 'test-key-123', model: 'nova-2' });
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('sends a KeepAlive text frame once audio has paused for 3 seconds, and none before', async () => {
+    const { session, ws } = await startSession();
+    try {
+      vi.advanceTimersByTime(2_999);
+      expect(textFrames(ws)).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(textFrames(ws)).toEqual([KEEPALIVE]);
+    } finally {
+      session.close();
+    }
+  });
+
+  it('keeps sending a KeepAlive every 3 seconds through a continued pause', async () => {
+    const { session, ws } = await startSession();
+    try {
+      vi.advanceTimersByTime(7_000);
+      expect(textFrames(ws)).toEqual([KEEPALIVE, KEEPALIVE]);
+    } finally {
+      session.close();
+    }
+  });
+
+  it('sends no KeepAlive while frames keep flowing', async () => {
+    const { session, ws } = await startSession();
+    try {
+      for (let i = 0; i < 4; i++) {
+        session.pushAudio(frame);
+        vi.advanceTimersByTime(2_500);
+      }
+      expect(textFrames(ws)).toEqual([]);
+      expect(ws.send).toHaveBeenCalledTimes(4); // only the audio frames
+    } finally {
+      session.close();
+    }
+  });
+
+  it('restarts the idle clock when audio resumes, so the next KeepAlive waits for the new pause', async () => {
+    const { session, ws } = await startSession();
+    try {
+      vi.advanceTimersByTime(2_500);
+      session.pushAudio(frame); // restarts the 3 s clock
+      vi.advanceTimersByTime(2_500); // 5 s total, but only 2.5 s since the frame
+      expect(textFrames(ws)).toEqual([]);
+      vi.advanceTimersByTime(501); // 3.001 s since the frame
+      expect(textFrames(ws)).toEqual([KEEPALIVE]);
+    } finally {
+      session.close();
+    }
+  });
+
+  it('sends nothing after close(), however long the pause', async () => {
+    const { session, ws } = await startSession();
+    session.close();
+    vi.advanceTimersByTime(30_000);
+    expect(textFrames(ws)).toEqual([]);
+  });
+
+  it('sends nothing once the server has closed the socket', async () => {
+    const { session, ws } = await startSession();
+    try {
+      vi.advanceTimersByTime(1_000);
+      ws.emit('close');
+      vi.advanceTimersByTime(30_000);
+      expect(textFrames(ws)).toEqual([]);
+    } finally {
+      session.close();
+    }
+  });
+
+  it('stops the idle timer when flush() sends CloseStream, so the drain sends no KeepAlive', async () => {
+    const { session, ws } = await startSession();
+    try {
+      const flushing = session.flush();
+      await vi.advanceTimersByTimeAsync(200);
+      await flushing;
+      vi.advanceTimersByTime(30_000);
+      expect(textFrames(ws)).toEqual([JSON.stringify({ type: 'CloseStream' })]);
+    } finally {
+      session.close();
+    }
   });
 });
