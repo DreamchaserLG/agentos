@@ -367,6 +367,47 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     expect(a.flush).not.toHaveBeenCalled();
   });
 
+  it('takes nothing from a provider after the error that began the switch, though it ends its segment and completes its flush within the same call: the backup takes the text and is flushed in its place', async () => {
+    const a = pushSession();
+    // As DeepgramAuraStreamingTTS does when its socket closes mid-reply: the error, then, in the same call, the frame it
+    // held and the flush_complete that ends its flush, then its close.
+    a.flush.mockImplementation(() => new Promise<void>(() => {}));
+    const b = pushSession();
+    b.flush.mockImplementation(async () => {
+      b.emit('audio', { audio: Buffer.from([9, 9]), format: 'pcm', sampleRate: 24000, durationMs: 0, text: '' });
+      b.emit('flush_complete');
+    });
+    const failover = vi.fn();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, provider('b', 20, b).tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    const heard: number[] = [];
+    const flushes = vi.fn();
+    const errors = vi.fn();
+    session.on('audio', (chunk: EncodedAudioChunk) => heard.push(chunk.audio[0]!));
+    session.on('flush_complete', flushes);
+    session.on('error', errors);
+    session.pushTokens('One. Two.');
+    const flushing = session.flush();
+    await vi.waitFor(() => expect(a.flush).toHaveBeenCalledOnce());
+    a.emit('error', new Error('deepgram aura ws closed (code 1011)'));
+    a.emit('audio', { audio: Buffer.from([1, 1]), format: 'pcm', sampleRate: 24000, durationMs: 0, text: 'One.' });
+    a.emit('flush_complete');
+    a.emit('close');
+    // Nothing of the failed provider's reaches the facade: its flush_complete would end the request as spoken.
+    expect(flushes).not.toHaveBeenCalled();
+    expect(heard).toEqual([]);
+    await flushing;
+    expect(failover.mock.calls[0]![0]).toMatchObject({ from: 'a', to: 'b' });
+    expect(b.pushTokens).toHaveBeenCalledWith('One. Two.');
+    expect(b.flush).toHaveBeenCalledOnce();
+    expect(heard).toEqual([9]);
+    expect(flushes).toHaveBeenCalledOnce();
+    expect(errors).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['at once', false],
     ['after a timer, as a connection does', true],
