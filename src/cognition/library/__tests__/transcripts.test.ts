@@ -661,6 +661,19 @@ describe('readTranscript', () => {
     expect(await readWordTranscript(wordFileOf(paragraphs), { extractRawText })).toEqual({ ...expected('otter-times.txt'), format: 'docx' });
   });
 
+  it('reads the paragraph straight after an Otter header in a Word file as that turn\'s words, as Otter\'s text reads its line', async () => {
+    const extractRawText: ExtractRawText = ({ arrayBuffer }) => mammoth.extractRawText({ buffer: Buffer.from(arrayBuffer) });
+    // mammoth's text follows each paragraph with a blank line, so the paragraph after a header that is a time alone,
+    // `2:30`, is read on the line straight after it only when the text is read a paragraph a line. An empty paragraph,
+    // as a Word file of the text's every line holds, is a blank line.
+    const said = '0:04  \nWhat time?\n\n0:09  \n2:30\n\n0:12  \nGood.\n\nTranscribed by https://otter.ai\n';
+    const want = { ...readTranscript(said, 'otter'), format: 'docx' };
+
+    expect(want.turns.map((turn) => turn.text)).toEqual(['What time?', '2:30', 'Good.']);
+    expect(await readWordTranscript(wordFileOf(said.split('\n').filter((line) => line.length > 0)), { extractRawText })).toEqual(want);
+    expect(await readWordTranscript(wordFileOf(said.trimEnd().split('\n')), { extractRawText })).toEqual(want);
+  });
+
   it('reads Fireflies\'s sentences from a list at the top, with times given as text, and a sentence with no speaker', () => {
     const read = readTranscript(
       JSON.stringify([
