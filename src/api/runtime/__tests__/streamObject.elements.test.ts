@@ -196,6 +196,26 @@ describe('streamObject with elements', () => {
     await expect(result.object).rejects.toThrow(/Stream interrupted/);
   });
 
+  it("rejects the object with the signal's reason when the reader stops after the signal aborted", async () => {
+    const gated = gatedStream(PIECES);
+    hoisted.generateCompletionStream.mockReturnValue(gated.stream);
+    const controller = new AbortController();
+    const reason = new Error('stop');
+    const result = streamObject({ model: 'openai:gpt-4o', schema: Answer, elements: 'sentences', prompt: 'p', abortSignal: controller.signal });
+    const reading = (async () => {
+      for await (const element of result.elementStream) {
+        void element;
+        controller.abort(reason);
+        break;
+      }
+    })();
+    await gated.feed();
+    await gated.feed();
+    await reading;
+    await expect(result.object).rejects.toBe(reason);
+    expect(await result.reportedUsage).toBeUndefined();
+  });
+
   it('throws at the call, before any request, when elements names no array field of the schema', () => {
     expect(() => streamObject({ model: 'openai:gpt-4o', schema: Answer, elements: 'answer', prompt: 'p' })).toThrow(TypeError);
     expect(hoisted.generateCompletionStream).not.toHaveBeenCalled();
