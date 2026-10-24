@@ -408,6 +408,59 @@ describe('StreamingTTSChain: a backup that fails as it takes over, and flush acr
     expect(errors).not.toHaveBeenCalled();
   });
 
+  it('goes on with a switch a cancel() comes in on: the backup takes the next request and none of the cut one, and the flush the cut request began flushes nothing of the next', async () => {
+    const a = pushSession();
+    // As a provider whose connection drops mid-flush: its flush waits for a reply that never comes.
+    a.flush.mockImplementation(() => new Promise<void>(() => {}));
+    const b = pushSession();
+    b.flush.mockImplementation(async () => {
+      b.emit('flush_complete');
+    });
+    const second = provider('b', 20, b);
+    // The backup's connection takes a while to open, as a socket's does: the cancel and the next request come meanwhile.
+    let opened!: () => void;
+    second.startSession.mockImplementation(() => new Promise<StreamingTTSSession>((resolve) => {
+      opened = () => resolve(b);
+    }));
+    const failover = vi.fn();
+    const chain = new StreamingTTSChain([provider('a', 10, a).tts, second.tts], {
+      enableMidSynthesisFailover: true,
+      onProviderFailover: failover,
+    });
+    const session = await chain.startSession();
+    const flushes = vi.fn();
+    const errors = vi.fn();
+    const closes = vi.fn();
+    session.on('flush_complete', flushes);
+    session.on('error', errors);
+    session.on('close', closes);
+    session.pushTokens('One. Two.');
+    const cut = session.flush();
+    await vi.waitFor(() => expect(a.flush).toHaveBeenCalledOnce());
+    a.emit('error', new Error('socket hang up'));
+    await vi.waitFor(() => expect(second.startSession).toHaveBeenCalledOnce());
+    // A barge-in while the backup opens cuts the request, and the next request begins before the backup has opened.
+    session.cancel();
+    session.pushTokens('Three.');
+    opened();
+    await cut;
+    // The backup takes the next request's text, none of the cut one's, and the flush the cut request began ends
+    // without flushing it: its flush_complete would end the next request before its text has all come.
+    expect(b.pushTokens.mock.calls).toEqual([['Three.']]);
+    expect(failover).toHaveBeenCalledWith(expect.objectContaining({ from: 'a', to: 'b' }));
+    expect(b.flush).not.toHaveBeenCalled();
+    expect(flushes).not.toHaveBeenCalled();
+    // The rest of the next request goes to the backup, and the request ends as a request does.
+    session.pushTokens(' Four.');
+    expect(b.pushTokens.mock.calls).toEqual([['Three.'], [' Four.']]);
+    await session.flush();
+    expect(b.flush).toHaveBeenCalledOnce();
+    expect(flushes).toHaveBeenCalledOnce();
+    expect(chain.currentProviderId).toBe('b');
+    expect(errors).not.toHaveBeenCalled();
+    expect(closes).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['at once', false],
     ['after a timer, as a connection does', true],
