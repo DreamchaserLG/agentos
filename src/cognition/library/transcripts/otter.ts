@@ -2,9 +2,11 @@
  * @fileoverview Otter's plain-text export: each turn a header line, then its paragraph; the file may close with
  * `Transcribed by https://otter.ai`. The export can be made without the speakers' names, without the times or with
  * neither, and a header holds what it was made with: the speaker's name, two spaces and the time the turn starts
- * (`Ana Silva  0:01`, `Ana Silva  1:02:10` past the hour); the time alone (`0:01`); or the name alone, with the two
- * spaces Otter writes after each part of a header (`Ana Silva  `). An export made with neither holds its paragraphs
- * alone. A Word file laid out the same way, each header and paragraph a paragraph of its own, reads by the same headers.
+ * (`Ana Silva  0:01`, `Ana Silva  1:02:10` past the hour); the time alone (`0:01  `); or the name alone (`Ana Silva  `),
+ * Otter writing two spaces after each part of a header. A text whose lines lost the spaces at their ends holds a time
+ * alone without them (`0:01`). An export made with neither holds its paragraphs alone. Otter's export of a voice note
+ * writes each header as the name, one space and the time, with nothing after it (`Unknown 0:00`). A Word file laid out
+ * the same way, each header and paragraph a paragraph of its own, reads by the same headers.
  * @module agentos/cognition/library/transcripts/otter
  */
 
@@ -33,6 +35,25 @@ interface HeadedTurn extends Header {
 }
 
 /**
+ * A line read as a name and a time: the speaker's name, the white space between the name and the time, and the turn's
+ * start; `null` when the line does not end in a time with nothing after it but white space, or holds no name before
+ * the time. The line is read from its end with no pattern that backtracks.
+ *
+ * @param line - One line of an Otter export.
+ */
+function nameAndTime(line: string): { label: string; gap: string; startMs: number } | null {
+  const trimmed = line.trimEnd();
+  const gapEnd = Math.max(trimmed.lastIndexOf(' '), trimmed.lastIndexOf('\t')) + 1;
+  const time = trimmed.slice(gapEnd);
+  if (gapEnd === 0 || !HEADER_TIME.test(time)) return null;
+  const name = trimmed.slice(0, gapEnd).trimEnd();
+  const label = name.trim();
+  const startMs = clockMs(time);
+  if (startMs === null || !isName(label, { anyCase: true })) return null;
+  return { label, gap: trimmed.slice(name.length, gapEnd), startMs };
+}
+
+/**
  * A header line's speaker and start, in an export made with the names and the times, or `null` when the line is no
  * such header. A header is a name, two spaces or more (or tabs), a time `M:SS` or `H:MM:SS`, and nothing after it but
  * white space. The name holds at most forty characters and no colon and starts with a letter of any case or script,
@@ -42,29 +63,51 @@ interface HeadedTurn extends Header {
  * @param line - One line of an Otter export.
  */
 export function otterHeader(line: string): { label: string; startMs: number } | null {
-  const trimmed = line.trimEnd();
-  const gapEnd = Math.max(trimmed.lastIndexOf(' '), trimmed.lastIndexOf('\t')) + 1;
-  const time = trimmed.slice(gapEnd);
-  if (gapEnd === 0 || !HEADER_TIME.test(time)) return null;
-  const name = trimmed.slice(0, gapEnd).trimEnd();
-  if (!HEADER_GAP.test(trimmed.slice(name.length, gapEnd))) return null;
-  const label = name.trim();
-  const startMs = clockMs(time);
-  return startMs === null || !isName(label, { anyCase: true }) ? null : { label, startMs };
+  const header = nameAndTime(line);
+  return header === null || !HEADER_GAP.test(header.gap) ? null : { label: header.label, startMs: header.startMs };
 }
 
 /**
- * A header line's start, in an export made without the speakers' names: a time `M:SS` or `H:MM:SS` alone, with
- * nothing after it but white space, as Otter writes it (`0:04  `) or without the spaces; `null` when the line is no
- * such header.
+ * A header line's speaker and start, in Otter's export of a voice note: a name, as {@link otterHeader} takes one, one
+ * space and a time, with nothing after it but white space (`Unknown 0:00`); `null` when the line is no such header. A
+ * line of words can end the same way (`We meet at 10:30`).
+ *
+ * @param line - One line of an Otter export.
+ */
+function voiceNoteHeader(line: string): Header | null {
+  const header = nameAndTime(line);
+  return header === null || header.gap !== ' ' ? null : { label: header.label, startMs: header.startMs };
+}
+
+/** A header's start from a time `M:SS` or `H:MM:SS` alone; `null` for any other text. */
+function startOf(time: string): Header | null {
+  if (!HEADER_TIME.test(time)) return null;
+  const startMs = clockMs(time);
+  return startMs === null ? null : { label: null, startMs };
+}
+
+/**
+ * A header line's start, in an export made without the speakers' names: a time `M:SS` or `H:MM:SS` alone and after it
+ * the two spaces or more (or tabs) Otter writes after each part of a header (`0:04  `); `null` when the line is no such
+ * header.
  *
  * @param line - One line of an Otter export.
  */
 function timeHeader(line: string): Header | null {
   const time = line.trimEnd();
-  if (!HEADER_TIME.test(time)) return null;
-  const startMs = clockMs(time);
-  return startMs === null ? null : { label: null, startMs };
+  return HEADER_GAP.test(line.slice(time.length)) ? startOf(time) : null;
+}
+
+/**
+ * A header line's start, in an export made without the speakers' names whose lines lost the spaces at their ends: a
+ * time alone without two spaces after it (`0:04`); `null` when the line is no such header. A paragraph can be a time
+ * alone written the same way (`2:30`).
+ *
+ * @param line - One line of an Otter export.
+ */
+function bareTimeHeader(line: string): Header | null {
+  const time = line.trimEnd();
+  return HEADER_GAP.test(line.slice(time.length)) ? null : startOf(time);
 }
 
 /**
@@ -87,21 +130,37 @@ interface Layout {
   /** The header a line holds in this layout, or `null`. */
   headerOf: (line: string) => Header | null;
   /**
-   * Whether the header is a time alone or a name alone, a weaker sign than a name and a time together: a paragraph
-   * can be a time alone, `2:30`. Such a header heads a turn only where Otter writes one: in an export that opens with
-   * one, and never on the line straight after a header, since Otter writes a header's words on the line after it.
+   * Whether the header is a weaker sign than a name, two spaces and a time, as a time alone, a name alone and a voice
+   * note's header are. Such a header heads turns only in an export that opens with one.
    */
-  alone: boolean;
+  opens: boolean;
+  /**
+   * Whether a line of words can take the header's form, as it can a time with no spaces after it (`2:30`) and a name,
+   * one space and a time (`We meet at 10:30`). The line straight after such a header is that header's words whatever
+   * it holds, since Otter writes a header's words on the line after it. A header of the other layouts heads a turn
+   * wherever it stands, straight after a header too: a name, two spaces and a time, and a time or a name alone with
+   * the two spaces after it, since Otter ends a paragraph's line with one space at most.
+   */
+  loose: boolean;
+  /** Whether the header heads turns only in a text that closes with Otter's closing line. */
+  closed: boolean;
 }
 
 /** The header of an export made with the names and the times. */
-const NAMES_AND_TIMES: Layout = { headerOf: otterHeader, alone: false };
+const NAMES_AND_TIMES: Layout = { headerOf: otterHeader, opens: false, loose: false, closed: false };
 
 /**
  * The layouts of a header, one for each way an export is made but with neither the names nor the times, in the order
- * a tie between two is settled: the names and the times, the times alone, the names alone.
+ * a tie between two is settled: the names and the times, a voice note's name and time, the times alone with the two
+ * spaces after them and without, the names alone.
  */
-const LAYOUTS: readonly Layout[] = [NAMES_AND_TIMES, { headerOf: timeHeader, alone: true }, { headerOf: nameHeader, alone: true }];
+const LAYOUTS: readonly Layout[] = [
+  NAMES_AND_TIMES,
+  { headerOf: voiceNoteHeader, opens: true, loose: true, closed: true },
+  { headerOf: timeHeader, opens: true, loose: false, closed: false },
+  { headerOf: bareTimeHeader, opens: true, loose: true, closed: false },
+  { headerOf: nameHeader, opens: true, loose: false, closed: false },
+];
 
 /**
  * A text's lines without the blank lines at its end, and without the closing line where it closes the text; `closed`
@@ -117,8 +176,9 @@ function bodyOf(text: string): { lines: string[]; closed: boolean } {
 
 /**
  * A text's turns by the headers of one layout: each header with its words, the lines after it up to the next header;
- * the lines before the first header are no turn's. In the layout of a time alone or a name alone, the line straight
- * after a header is that header's words whatever it holds, a time alone too, and heads no turn.
+ * the lines before the first header are no turn's. In a layout whose header a line of words can take, the line
+ * straight after a header is that header's words whatever it holds, and heads no turn; in the others a header heads a
+ * turn wherever it stands.
  *
  * @param lines - The text's lines.
  * @param layout - The layout whose headers are read.
@@ -130,7 +190,7 @@ function turnsOf(lines: readonly string[], layout: Layout, cut = -1): HeadedTurn
   let afterHeader = false;
   for (let at = 0; at < lines.length; at += 1) {
     const line = lines[at];
-    const header: Header | null = at === cut || (layout.alone && afterHeader) ? null : layout.headerOf(line);
+    const header: Header | null = at === cut || (layout.loose && afterHeader) ? null : layout.headerOf(line);
     afterHeader = header !== null;
     if (header !== null) turns.push({ ...header, words: [] });
     else if (turns.length > 0) turns[turns.length - 1].words.push(line);
@@ -142,17 +202,20 @@ function turnsOf(lines: readonly string[], layout: Layout, cut = -1): HeadedTurn
  * The turns of an export by its own headers, or `null` when it holds none, as an export made with neither the names
  * nor the times does. An export has one layout of header, the one most of its headers are, a tie settled by the order
  * of {@link LAYOUTS}, so a paragraph that is a time alone in an export of names, or of names and times, is words. A
- * time alone or a name alone heads turns only in an export that opens with one, so in an export of paragraphs a
- * paragraph further down that is a time alone is words, and the paragraphs before it are turns, not lines before a
- * first header.
+ * header weaker than a name, two spaces and a time heads turns only in an export that opens with one, so in an export
+ * of paragraphs a paragraph further down that is a time alone is words, and the paragraphs before it are turns, not
+ * lines before a first header. A voice note's header heads turns only in a text that closes with Otter's closing line,
+ * since a line of words can end as it does.
  *
  * @param lines - The text's lines, as {@link bodyOf} keeps them.
+ * @param closed - Whether the text closes with Otter's closing line.
  */
-function exportTurns(lines: readonly string[]): HeadedTurn[] | null {
+function exportTurns(lines: readonly string[], closed: boolean): HeadedTurn[] | null {
   const first = lines.find((line) => line.trim() !== '');
   let chosen: HeadedTurn[] | null = null;
   for (const layout of LAYOUTS) {
-    if (layout.alone && (first === undefined || layout.headerOf(first) === null)) continue;
+    if (layout.closed && !closed) continue;
+    if (layout.opens && (first === undefined || layout.headerOf(first) === null)) continue;
     const turns = turnsOf(lines, layout);
     if (turns.length > (chosen === null ? 0 : chosen.length)) chosen = turns;
   }
@@ -165,9 +228,10 @@ function exportTurns(lines: readonly string[]): HeadedTurn[] | null {
  * several lines, as a Word file's paragraphs do, and the lines before the first header are not weighed. One line in
  * other text that looks like a header, such as `Break  10:30` in an agenda, does not make the text Otter's, and neither
  * does a column of names and times with no words under them. Times or names alone on lines of their own are not told
- * from an agenda or a page of headings, so an export made without the names or without the times, like one made with
- * neither, is told by its closing line. Without that line, as when Otter's branding is turned off, such an export and
- * an export of one turn are not told apart from other text.
+ * from an agenda or a page of headings, and a voice note's header, a name, one space and a time, ends as a line of
+ * words can, so an export made without the names or without the times, one made with neither and one of a voice note
+ * are told by the closing line. Without that line, as when Otter's branding is turned off, such an export and an export
+ * of one turn are not told apart from other text.
  *
  * @param text - The text, its line ends already line feeds.
  * @param options - `cutLastLine` when the text is a file's first bytes and its last line may stop short: that line is
@@ -187,14 +251,14 @@ export function isOtterLayout(text: string, options: { cutLastLine?: boolean } =
  * and so are the lines before the first header (a title, a date, keywords) and the closing line where it closes the
  * file. A header gives a start and no end, so `durationMs` is `null`. A text with no header, as an export made with
  * neither the names nor the times is, reads as plain lines, one turn a paragraph as Otter writes each on a line of its
- * own, without the closing line.
+ * own, without the closing line; so does a voice note's export without the closing line.
  *
  * @param text - The file's text, its line ends already line feeds.
  * @param format - The format to answer with: `otter`, or `docx` for a Word file's text.
  */
 export function readOtter(text: string, format: TranscriptFormat = 'otter'): ReadTranscript {
-  const { lines } = bodyOf(text);
-  const turns = exportTurns(lines);
+  const { lines, closed } = bodyOf(text);
+  const turns = exportTurns(lines, closed);
   if (turns === null) return readLines(lines.join('\n'), format);
   const segments: Segment[] = turns.map((turn) => ({
     startMs: turn.startMs,
