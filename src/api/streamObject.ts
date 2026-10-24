@@ -876,7 +876,8 @@ export function streamObject<T extends ZodType, K extends string = never>(
   /**
    * Records that the reader of one iterable left it before the end. The
    * stream goes on while the other iterable is being read; when neither is,
-   * the request is closed and the result settles as interrupted.
+   * the request is closed and the result settles as interrupted, or as
+   * aborted when the caller's signal has aborted.
    */
   function stopReading(reader: 'partial' | 'element'): Promise<void> {
     if (reader === 'partial') {
@@ -887,7 +888,9 @@ export function streamObject<T extends ZodType, K extends string = never>(
       elements.length = 0;
     }
     if (ending !== undefined || partialReader === 'reading' || elementReader === 'reading') return settled;
-    return finish({ kind: 'abandoned' });
+    // A reader that stops after the caller's signal aborted (an abort, then a
+    // `break`) ends the call as the signal did: `object` rejects with its reason.
+    return finish(opts.abortSignal?.aborted ? { kind: 'aborted' } : { kind: 'abandoned' });
   }
 
   /** The partial objects, taken from the shared stream. */
