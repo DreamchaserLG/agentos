@@ -2,7 +2,7 @@
 
 `meeting.srt`, `meeting.vtt`, `otter.txt`, `fireflies.json` and `lines.txt` are written for these tests: one meeting of six turns in each layout.
 
-The three `otter-*.txt` files are real exports from Otter, published under open licences. Each is cut from its source as the table says; the lines kept are byte for byte the source's, the spaces at their ends included. They are test data and are not part of the published package.
+`otter-names-times.txt`, `otter-times.txt` and `otter-names.txt` are real exports from Otter, published under open licences. Each is cut from its source as the table says; the lines kept are byte for byte the source's, the spaces at their ends included. They are test data and are not part of the published package.
 
 | Vector | Source | Licence | Lines kept |
 |---|---|---|---|
@@ -17,3 +17,5 @@ Otter's export has two options, the speakers' names and the times, and each file
 - `otter-names.txt`: names alone. A header is the name and two spaces: `Sam  `. A paragraph line ends with one space at most.
 
 An export made with neither option holds its paragraphs and its closing line alone.
+
+`otter-names-times-one-space.txt` is written for these tests in the layout of the export Otter makes of a voice note, since no such export was found under an open licence. That export writes each header as the speaker's name, one space and the time, with nothing after it (`Unknown 0:03`), ends no line with a space, and has no line feed after its closing line, as public files show it: for one, `My tutorial recording_otter.ai.txt` in [philsgu/myfoo_python at 8a5ebfe2](https://github.com/philsgu/myfoo_python/blob/8a5ebfe20fb4f2f1ff3648df0e728327d5d7ceca/My%20tutorial%20recording_otter.ai.txt). The vector's words are its own; none is copied from such a file.
