@@ -130,7 +130,7 @@ function turnsOf(lines: readonly string[], layout: Layout, cut = -1): HeadedTurn
   let afterHeader = false;
   for (let at = 0; at < lines.length; at += 1) {
     const line = lines[at];
-    const header = at === cut || (layout.alone && afterHeader) ? null : layout.headerOf(line);
+    const header: Header | null = at === cut || (layout.alone && afterHeader) ? null : layout.headerOf(line);
     afterHeader = header !== null;
     if (header !== null) turns.push({ ...header, words: [] });
     else if (turns.length > 0) turns[turns.length - 1].words.push(line);
