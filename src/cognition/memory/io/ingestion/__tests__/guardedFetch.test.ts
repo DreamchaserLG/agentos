@@ -73,6 +73,10 @@ function answer(request: IncomingMessage, response: ServerResponse): void {
   } else if (path === '/to-private') {
     response.writeHead(302, { location: `http://metadata.test:${port}/latest` });
     response.end();
+  } else if (path === '/to-provider') {
+    // A page that sends its reader on to a provider's own site.
+    response.writeHead(302, { location: 'https://docs.google.com/document/d/x/edit' });
+    response.end();
   } else if (path === '/untyped') {
     // No Content-Type at all, as some file servers answer.
     response.writeHead(200);
@@ -268,6 +272,235 @@ describe('guardedFetch', () => {
 
     const resolve = async (host: string) => [{ address: host === 'metadata.test' ? '169.254.169.254' : '127.0.0.1', family: 4 }];
     expect(await reasonOf(guardedFetch(at('/to-private'), reach({ resolve })))).toBe('address');
+  });
+
+  describe('allowHost', () => {
+    /** A caller's host rule that refuses one provider's host and records every host it is asked about. */
+    function refusing(seen: string[] = []): (host: string) => boolean {
+      return (host) => {
+        seen.push(host);
+        return host !== 'docs.google.com';
+      };
+    }
+
+    /** A resolver that answers the stand-in's address for any host and counts the lookups. */
+    function counting(): { resolve: NonNullable<GuardedFetchOptions['resolve']>; lookups: () => number } {
+      let lookups = 0;
+      return {
+        resolve: async () => {
+          lookups += 1;
+          return [{ address: '127.0.0.1', family: 4 }];
+        },
+        lookups: () => lookups,
+      };
+    }
+
+    it('refuses a host the caller does not allow before any lookup or connection, whatever its port or spelling', async () => {
+      const before = connections;
+      const lookup = counting();
+      const seen: string[] = [];
+      const addresses = ['https://docs.google.com/document/d/x', 'http://docs.google.com:8080/x', 'http://DOCS.GOOGLE.COM./document/d/x'];
+      for (const address of addresses) {
+        expect(await reasonOf(guardedFetch(address, reach({ resolve: lookup.resolve, allowHost: refusing(seen) }))), address).toBe('host');
+      }
+      // The rule sees the host alone: in lower case, without the port and without a trailing dot.
+      expect(seen).toEqual(['docs.google.com', 'docs.google.com', 'docs.google.com']);
+      expect(lookup.lookups()).toBe(0);
+      expect(connections).toBe(before);
+    });
+
+    it('refuses a redirect to such a host at the redirect: the first request made, the second not', async () => {
+      const asked = hosts.length;
+      const before = connections;
+      const lookup = counting();
+      const seen: string[] = [];
+      expect(await reasonOf(guardedFetch(at('/to-provider'), reach({ resolve: lookup.resolve, allowHost: refusing(seen) })))).toBe('host');
+      expect(hosts.slice(asked)).toEqual([`pages.test:${port}`]);
+      expect(seen).toEqual(['pages.test', 'docs.google.com']);
+      // The first hop's host was resolved; the redirect's target never was.
+      expect(lookup.lookups()).toBe(1);
+      expect(connections).toBe(before + 1);
+
+      // Without the rule the same redirect is checked as before: its port is not one this read allows.
+      expect(await reasonOf(guardedFetch(at('/to-provider'), reach()))).toBe('port');
+    });
+
+    it('reads a redirect to a host the caller allows as before', async () => {
+      const seen: string[] = [];
+      const followed = await guardedFetch(at('/redirect/1'), reach({ allowHost: refusing(seen) }));
+      expect(followed.url).toBe(at('/page'));
+      expect(followed.body.toString('utf8')).toBe(PAGE);
+      expect(seen).toEqual(['pages.test', 'pages.test']);
+    });
+
+    it('narrows only: a host the caller allows still passes every other check', async () => {
+      const everything = () => true;
+      const before = connections;
+      // A name that resolves to a private address.
+      const privateName = async () => [{ address: '10.0.0.1', family: 4 }];
+      expect(await reasonOf(guardedFetch(at('/page'), reach({ allowHost: everything, resolve: privateName })))).toBe('address');
+      // Literal addresses that are not public: IPv4, IPv4 inside IPv6, unique-local IPv6.
+      for (const host of ['169.254.169.254', '[::ffff:169.254.169.254]', '[fd00::1]']) {
+        const address = `http://${host}:${port}/page`;
+        expect(await reasonOf(guardedFetch(address, reach({ allowHost: everything, allowAddresses: [] }))), address).toBe('address');
+      }
+      // An IPv6 literal reaches the rule without its brackets, and is still refused by its address.
+      const seen: string[] = [];
+      const recording = (host: string) => {
+        seen.push(host);
+        return true;
+      };
+      expect(await reasonOf(guardedFetch(`http://[::ffff:7f00:1]:${port}/page`, reach({ allowHost: recording, allowAddresses: [] })))).toBe('address');
+      expect(seen).toEqual(['::ffff:7f00:1']);
+      // The scheme and the port hold too.
+      expect(await reasonOf(guardedFetch('ftp://pages.test/notes', reach({ allowHost: everything })))).toBe('scheme');
+      expect(await reasonOf(guardedFetch('http://pages.test:8080/', reach({ allowHost: everything })))).toBe('port');
+      expect(connections).toBe(before);
+      // A redirect to a name that resolves to a private address, and the redirect count.
+      const resolve = async (host: string) => [{ address: host === 'metadata.test' ? '169.254.169.254' : '127.0.0.1', family: 4 }];
+      expect(await reasonOf(guardedFetch(at('/to-private'), reach({ allowHost: everything, resolve })))).toBe('address');
+      expect(await reasonOf(guardedFetch(at('/redirect/4'), reach({ allowHost: everything })))).toBe('redirects');
+    });
+
+    it('refuses on any answer but true, on a rule that throws, and a rule that is not a function before any lookup', async () => {
+      const lookup = counting();
+      const truthy = (() => 1) as unknown as GuardedFetchOptions['allowHost'];
+      expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve: lookup.resolve, allowHost: truthy })))).toBe('host');
+      // A rule that fails is a rule that did not say yes. What it threw is the
+      // refusal's cause, for whoever reads the rule's own logs; the message
+      // keeps its details out.
+      const trouble = new Error('the list could not be read from 10.0.0.53');
+      const failing = (): boolean => {
+        throw trouble;
+      };
+      const refused = await guardedFetch(at('/page'), reach({ resolve: lookup.resolve, allowHost: failing })).then(
+        () => 'read',
+        (error: unknown) => error,
+      );
+      expect(refused).toBeInstanceOf(GuardedFetchError);
+      expect(refused).toMatchObject({ reason: 'host', message: 'pages.test is not read: the host rule failed' });
+      expect(refused).toHaveProperty('cause', trouble);
+      const notARule = 'docs.google.com' as unknown as GuardedFetchOptions['allowHost'];
+      await expect(guardedFetch(at('/page'), reach({ resolve: lookup.resolve, allowHost: notARule }))).rejects.toBeInstanceOf(TypeError);
+      expect(lookup.lookups()).toBe(0);
+    });
+
+    it('is asked under the deadline: a rule that outlasts it leaves the read refused for the deadline, with nothing begun after it', async () => {
+      const before = connections;
+      const lookup = counting();
+      const deadlineMs = 50;
+      /** A rule that takes three times the deadline to give `answer`. */
+      const slow = (answer: boolean) => (): boolean => {
+        const until = Date.now() + 3 * deadlineMs;
+        while (Date.now() < until) {
+          // The rule is at work.
+        }
+        return answer;
+      };
+      // A rule that says yes too late: no lookup is asked for and nothing is
+      // connected to. The deadline's timer cannot fire while the rule runs, so
+      // the deadline is read from the clock once the rule returns.
+      expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve: lookup.resolve, allowHost: slow(true), deadlineMs })))).toBe('deadline');
+      expect(lookup.lookups()).toBe(0);
+      // A rule that says no too late: the deadline, not the host, is the reason.
+      expect(await reasonOf(guardedFetch(at('/page'), reach({ resolve: lookup.resolve, allowHost: slow(false), deadlineMs })))).toBe('deadline');
+      expect(lookup.lookups()).toBe(0);
+      expect(connections).toBe(before);
+      // A literal public address needs no lookup, so the connection is the next
+      // step: nothing is begun there either. Blocked, so no case reaches past
+      // this machine if the step regresses.
+      const connect = vi.spyOn(Socket.prototype, 'connect').mockImplementation(() => {
+        throw new Error('unexpected connection');
+      });
+      try {
+        expect(await reasonOf(guardedFetch('http://93.184.215.14/page', reach({ allowHost: slow(true), allowPorts: [80], deadlineMs })))).toBe('deadline');
+        expect(connect).not.toHaveBeenCalled();
+      } finally {
+        connect.mockRestore();
+      }
+    });
+
+    it("ends on the caller's abort from inside the rule with the signal's reason and no lookup, at the first address as at a redirect", async () => {
+      const reason = new Error('the caller moved on');
+      // A rule that refuses, having told the fetch to stop: the signal's reason wins over the refusal.
+      const refusing = counting();
+      const stopper = new AbortController();
+      const refusesAndStops = (): boolean => {
+        stopper.abort(reason);
+        return false;
+      };
+      await expect(
+        guardedFetch(at('/page'), reach({ resolve: refusing.resolve, allowHost: refusesAndStops, signal: stopper.signal })),
+      ).rejects.toBe(reason);
+      expect(refusing.lookups()).toBe(0);
+
+      // A rule that allows, having told the fetch to stop: no lookup is started for a read that has ended.
+      const allowing = counting();
+      const stopperToo = new AbortController();
+      const allowsAndStops = (): boolean => {
+        stopperToo.abort(reason);
+        return true;
+      };
+      await expect(
+        guardedFetch(at('/page'), reach({ resolve: allowing.resolve, allowHost: allowsAndStops, signal: stopperToo.signal })),
+      ).rejects.toBe(reason);
+      expect(allowing.lookups()).toBe(0);
+
+      // The same at a redirect: the first hop's host was resolved, the redirect's target never.
+      const atTheRedirect = counting();
+      const seen: string[] = [];
+      const stopperAtTheRedirect = new AbortController();
+      const stopsAtTheSecond = (host: string): boolean => {
+        seen.push(host);
+        if (seen.length === 2) stopperAtTheRedirect.abort(reason);
+        return true;
+      };
+      await expect(
+        guardedFetch(at('/redirect/1'), reach({ resolve: atTheRedirect.resolve, allowHost: stopsAtTheSecond, signal: stopperAtTheRedirect.signal })),
+      ).rejects.toBe(reason);
+      expect(seen).toEqual(['pages.test', 'pages.test']);
+      expect(atTheRedirect.lookups()).toBe(1);
+    });
+
+    it('begins no connection for a read the rule ended at a literal address, which needs no lookup', async () => {
+      const reason = new Error('the caller moved on');
+      // A public address written as a literal reaches the connection step with
+      // no lookup to end the read at. Blocked here, so no case reaches past
+      // this machine if the step regresses.
+      const connect = vi.spyOn(Socket.prototype, 'connect').mockImplementation(() => {
+        throw new Error('unexpected connection');
+      });
+      try {
+        const stopper = new AbortController();
+        const allowsAndStops = (): boolean => {
+          stopper.abort(reason);
+          return true;
+        };
+        await expect(
+          guardedFetch('http://93.184.215.14/page', reach({ allowHost: allowsAndStops, allowPorts: [80], signal: stopper.signal })),
+        ).rejects.toBe(reason);
+        expect(connect).not.toHaveBeenCalled();
+      } finally {
+        connect.mockRestore();
+      }
+    });
+  });
+
+  it("ends with the caller's reason when the resolver aborts the signal as it starts and never answers", async () => {
+    const reason = new Error('the caller moved on');
+    const stopper = new AbortController();
+    /** A resolver that stops the read as it starts and then never answers, as one wired to the caller's own cancellation might. */
+    const stopsAndHangs = () => {
+      stopper.abort(reason);
+      return new Promise<Array<{ address: string; family: number }>>(() => {});
+    };
+    const outcome = guardedFetch(at('/page'), reach({ resolve: stopsAndHangs, signal: stopper.signal })).then(
+      () => 'read',
+      (error: unknown) => error,
+    );
+    // A read that waited for the resolver's answer would never end; the race says so within a second.
+    const hung = new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 1_000));
+    expect(await Promise.race([outcome, hung])).toBe(reason);
   });
 
   /** The addresses each new client socket tries to connect to, in order, while `run` runs. */
