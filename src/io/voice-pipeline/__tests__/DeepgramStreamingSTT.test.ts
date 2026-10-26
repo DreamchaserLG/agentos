@@ -260,6 +260,7 @@ describe('DeepgramStreamingSTT – KeepAlive while audio pauses', () => {
   it('sends a KeepAlive text frame once audio has paused for 3 seconds, and none before', async () => {
     const { session, ws } = await startSession();
     try {
+      session.pushAudio(frame);
       vi.advanceTimersByTime(2_999);
       expect(textFrames(ws)).toEqual([]);
       vi.advanceTimersByTime(1);
@@ -272,8 +273,16 @@ describe('DeepgramStreamingSTT – KeepAlive while audio pauses', () => {
   it('keeps sending a KeepAlive every 3 seconds through a continued pause', async () => {
     const { session, ws } = await startSession();
     try {
-      vi.advanceTimersByTime(7_000);
+      session.pushAudio(frame);
+      vi.advanceTimersByTime(3_000);
+      expect(textFrames(ws)).toEqual([KEEPALIVE]);
+      // The next one 3 seconds after the first, not sooner or later.
+      vi.advanceTimersByTime(2_999);
+      expect(textFrames(ws)).toEqual([KEEPALIVE]);
+      vi.advanceTimersByTime(1);
       expect(textFrames(ws)).toEqual([KEEPALIVE, KEEPALIVE]);
+      vi.advanceTimersByTime(3_000);
+      expect(textFrames(ws)).toEqual([KEEPALIVE, KEEPALIVE, KEEPALIVE]);
     } finally {
       session.close();
     }
@@ -298,10 +307,33 @@ describe('DeepgramStreamingSTT – KeepAlive while audio pauses', () => {
     try {
       vi.advanceTimersByTime(2_500);
       session.pushAudio(frame); // restarts the 3 s clock
-      vi.advanceTimersByTime(2_500); // 5 s total, but only 2.5 s since the frame
+      vi.advanceTimersByTime(2_999); // 5.499 s in all, but 2.999 s since the frame
       expect(textFrames(ws)).toEqual([]);
-      vi.advanceTimersByTime(501); // 3.001 s since the frame
+      vi.advanceTimersByTime(1); // 3 s since the frame
       expect(textFrames(ws)).toEqual([KEEPALIVE]);
+    } finally {
+      session.close();
+    }
+  });
+
+  it('sends 20 ms of silence, not a KeepAlive, when no audio has gone out 3 seconds after the socket opened', async () => {
+    // Deepgram closes a socket that receives no audio within 10 seconds of opening, KeepAlive frames or not (NET-0001).
+    const { session, ws } = await startSession();
+    try {
+      vi.advanceTimersByTime(2_999);
+      expect(ws.send).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(textFrames(ws)).toEqual([]);
+      expect(ws.send).toHaveBeenCalledTimes(1);
+      const silence = ws.send.mock.calls[0][0] as Buffer;
+      expect(Buffer.isBuffer(silence)).toBe(true);
+      expect(silence.length).toBe(640); // 320 samples of PCM16 at 16 kHz
+      expect(silence.every((byte) => byte === 0)).toBe(true);
+      expect((session as any).audioSeconds).toBeCloseTo(0.02);
+      // Audio has gone out now, so the pause goes on with KeepAlive frames.
+      vi.advanceTimersByTime(3_000);
+      expect(textFrames(ws)).toEqual([KEEPALIVE]);
+      expect(ws.send).toHaveBeenCalledTimes(2);
     } finally {
       session.close();
     }
