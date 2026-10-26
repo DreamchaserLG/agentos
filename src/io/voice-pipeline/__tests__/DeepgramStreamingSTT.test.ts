@@ -338,4 +338,18 @@ describe('DeepgramStreamingSTT – KeepAlive while audio pauses', () => {
       session.close();
     }
   });
+
+  it('sends no KeepAlive after flush() sent CloseStream, even when audio arrives during the drain and the socket stays open', async () => {
+    const { session, ws } = await startSession();
+    try {
+      const flushing = session.flush();
+      session.pushAudio(frame); // a wrapper forwarding audio after the flush
+      await vi.advanceTimersByTimeAsync(200);
+      await flushing;
+      vi.advanceTimersByTime(30_000);
+      expect(textFrames(ws)).toEqual([JSON.stringify({ type: 'CloseStream' })]);
+    } finally {
+      session.close();
+    }
+  });
 });
