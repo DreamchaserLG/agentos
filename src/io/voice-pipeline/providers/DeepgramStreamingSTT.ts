@@ -247,6 +247,8 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
   private openItemSpeechEnded = false;
   private usageTimer: ReturnType<typeof setInterval> | undefined;
   private keepAliveTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Whether `flush()` sent `CloseStream`: the stream is ending, so no `KeepAlive` follows. */
+  private draining = false;
 
   /** Wire seconds sent on this socket so far. */
   get audioSeconds(): number {
@@ -466,6 +468,8 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
   /** Requests final results; the existing 200 ms drain bound is preserved. */
   async flush(): Promise<void> {
     if (this.closed || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    // The stream ends here: a frame pushed during the drain arms no KeepAlive.
+    this.draining = true;
     this.clearKeepAlive();
     this.ws.send(JSON.stringify({ type: 'CloseStream' }));
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
@@ -495,16 +499,17 @@ class DeepgramStreamingSTTSession extends EventEmitter implements StreamingSTTSe
    * Arms the one-shot idle timer whose expiry sends Deepgram's `KeepAlive`.
    * Rescheduled by every frame actually sent (`pushAudio`) and by each
    * `KeepAlive` itself, so the frame goes out only while audio pauses; a
-   * session that has ended, a socket that is no longer open, or the final
-   * drain after `CloseStream` (`flush`) arms nothing.
+   * session that has ended, a socket that is no longer open, or a stream
+   * `flush` ended with `CloseStream` arms nothing, even when audio still
+   * arrives during the drain.
    */
   private scheduleKeepAlive(): void {
     this.clearKeepAlive();
-    if (this.closed) return;
+    if (this.closed || this.draining) return;
     this.keepAliveTimer = setTimeout(() => {
       this.keepAliveTimer = undefined;
       const socket = this.ws;
-      if (this.closed || !socket || socket.readyState !== WebSocket.OPEN) return;
+      if (this.closed || this.draining || !socket || socket.readyState !== WebSocket.OPEN) return;
       socket.send(JSON.stringify({ type: 'KeepAlive' }));
       this.scheduleKeepAlive();
     }, KEEPALIVE_IDLE_MS);
