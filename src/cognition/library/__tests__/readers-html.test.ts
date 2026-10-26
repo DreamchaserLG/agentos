@@ -32,6 +32,16 @@ describe('readHtml over a stand-in of the DOM', () => {
     expect(formula && readHtml(formula)).toEqual({ title: null, markdown: 'x', images: 0, cut: false });
   });
 
+  it("reads the header and footer of an article handed over as the element, which are the article's own", () => {
+    const [article] = standInDocument('<article><header><h2>Day one</h2></header><p>We walked.</p><footer>Filed under travel</footer></article>').childNodes;
+    expect(article && readHtml(article)).toEqual({ title: null, markdown: '## Day one\n\nWe walked.\n\nFiled under travel', images: 0, cut: false });
+  });
+
+  it("leaves out the footer of a section handed over as the element when the section wraps the page's main content", () => {
+    const [section] = standInDocument('<section class="wy-nav-content-wrap"><div role="main"><p>Run the installer.</p></div><footer>Built with Sphinx</footer></section>').childNodes;
+    expect(section && readHtml(section)).toEqual({ title: null, markdown: 'Run the installer.', images: 0, cut: false });
+  });
+
   it('keeps a table to 500 rows and 30 columns unless told otherwise', () => {
     const row = (cells: string[]): string => `<tr>${cells.map((cell) => `<td>${cell}</td>`).join('')}</tr>`;
     const head = row(Array.from({ length: 31 }, (_, index) => `c${index + 1}`));
